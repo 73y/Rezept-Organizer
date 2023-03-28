@@ -1,0 +1,45 @@
+* {
+    box-sizing: border-box;
+    color: rgb(211, 211, 211);
+}
+
+body {
+    background-color: rgb(49, 49, 49);
+    margin: 0;
+    padding: 0;
+}
+
+.main {
+    height: calc(100vh - var(--menu-height));
+    display: flex;
+    padding-top: 2rem;
+    margin-left: calc(var(--menu-width) + 2rem);
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+}
+
+.hide {
+    display: none;
+}
+
+table {
+    font-size: 2rem;
+    background-color: rgb(61, 61, 61);
+    border-collapse: collapse;
+    overflow: hidden;
+    border-radius: 1rem;
+}
+
+td, th {
+    padding: 1.5rem 2.5rem;
+    text-align: left;
+}
+
+thead {
+    background-color: rgb(33, 102, 79);
+}
+
+tr:nth-child(even) {
+    background-color: rgb(53, 53, 53);
+}

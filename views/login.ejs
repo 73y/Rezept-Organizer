@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rezept-Organizer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/navbar.css">
+    <link rel="stylesheet" href="css/normalSettings.css">
+</head>
+<body>
+    <nav class="navbar" id="navbar">
+        <ul class="navbar-nav">
+            <li class="nav-item">
+                <div class="menuButton" id="menuOpener">
+                    <div class="menuStrich"></div>
+                    <div class="menuStrich"></div>
+                    <div class="menuStrich"></div>
+                </div>
+            </li>
+            <li class="nav-item">
+                <a href="http://localhost:3000/shoppingList" class="nav-link">
+                    <img src="imgs/navbar_icons/einkaufsliste_icon.png" alt="KaufListe" height="44px" name="einkaufsliste">
+                    <span class="link-text hide">Einkaufsliste</span>
+                </a>
+            </li>
+            <li class="nav-item">
+                <a href="http://localhost:3000/recipe" class="nav-link">
+                    <img src="imgs/navbar_icons/rezepte_icon.png" alt="rezepte" height="44px" name="rezepte">
+                    <span class="link-text hide">Rezepte</span>
+                </a>
+            </li>
+            <li class="nav-item">
+                <a href="http://localhost:3000/ingredient" class="nav-link">
+                    <img src="imgs/navbar_icons/zutaten_icon.png" alt="zutaten" height="44px" name="zutaten">
+                    <span class="link-text hide">Zutaten</span>
+                </a>
+            </li>
+
+        </ul>
+    </nav>
+    <div class="searchbar" id="searchbar">
+        <input type="search" id="search" class="search-item" placeholder="Suchen">
+        <button name="search-button" id="search-button" class="search-item">Suchen</button>
+        <button name="add-rezept" id="add-rezept" class="search-item">+</button>
+    </div>
+    <main class="main">
+        <form method="POST" action="/login">
+            <label for="username">Username:</label>
+            <input type="text" id="username" name="username" required>
+            <button type="submit">Login</button>
+            <a href=""></a>
+        </form>
+    </main>
+    <script src="js/navbar.js" defer></script>
+</body>
+</html>

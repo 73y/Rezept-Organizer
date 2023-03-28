@@ -1,0 +1,21 @@
+* {
+    box-sizing: border-box;
+    color: rgb(211, 211, 211);
+}
+
+body {
+    background-color: rgb(49, 49, 49);
+    margin: 0;
+    padding: 0;
+}
+
+.main {
+    display: flex;
+    padding-top: 2rem;
+    margin-left: calc(var(--menu-width) + 2rem);
+    flex-wrap: wrap;
+}
+
+.hide {
+    display: none;
+}
