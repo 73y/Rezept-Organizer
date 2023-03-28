@@ -10,6 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/navbar.css">
     <link rel="stylesheet" href="css/normalSettings.css">
+    <link rel="stylesheet" href="css/login.css">
 </head>
 <body>
     <nav class="navbar" id="navbar">
@@ -48,12 +49,19 @@
         <button name="add-rezept" id="add-rezept" class="search-item">+</button>
     </div>
     <main class="main">
+        <h2>Login</h2>
         <form method="POST" action="/login">
-            <label for="username">Username:</label>
-            <input type="text" id="username" name="username" required>
-            <button type="submit">Login</button>
-            <a href=""></a>
+            <div>
+                <label for="username">Username:</label>
+                <input type="text" id="username" name="username" required>
+            </div>
+            <div>
+                <label for="password">Password:</label>
+                <input type="text" id="password" name="password" required>
+            </div>
+            <button type="submit">LogIn</button>
         </form>
+        <a href="./register">Register</a>
     </main>
     <script src="js/navbar.js" defer></script>
 </body>
