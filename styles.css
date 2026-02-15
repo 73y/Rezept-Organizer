@@ -638,6 +638,8 @@ button.warn:hover { background: rgba(245,158,11,0.16); }
 .scan-video{ width:100%; max-height:320px; object-fit:cover; border-radius:12px; border:1px solid var(--border); background:#000; }
 .scan-video-wrap{ display:flex; flex-direction:column; gap:10px; }
 .scan-hint{ opacity:0.85; }
+.scan-result{ margin-top:12px; padding:12px; border:1px solid var(--border); border-radius:12px; background: rgba(255,255,255,0.03); }
+.barcode-view{ padding:10px 12px; border:1px solid var(--border); border-radius:12px; background: rgba(255,255,255,0.03); font-weight:800; letter-spacing:0.5px; min-height:40px; display:flex; align-items:center; }
 @media (max-width:520px){
   .scan-modal{ height: calc(100vh - 16px); max-height:none; }
   .scan-video{ max-height:44vh; }

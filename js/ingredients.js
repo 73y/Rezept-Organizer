@@ -194,7 +194,6 @@
     const before = Math.max(1, Math.round(Number(it.packs) || 1));
     it.packs = before + add;
   }
-
   function openBarcodeScannerModal(state, persist) {
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
@@ -212,15 +211,11 @@
       <div class="modal-body">
         <div class="scan-video-wrap">
           <video id="scan-video" class="scan-video" autoplay playsinline></video>
-          <div class="scan-hint small muted2">Kamera auf den Barcode halten (EAN). Falls es nicht klappt: unten eintippen.</div>
+          <div class="scan-hint small muted2">Kamera auf den Barcode halten (EAN). Wenn dein Gerät das Scannen nicht unterstützt: „Ohne Barcode“.</div>
         </div>
 
-        <div class="row" style="margin-top:12px;">
-          <div>
-            <label class="small">Barcode (EAN/UPC)</label><br/>
-            <input id="scan-code" inputmode="numeric" placeholder="Scan oder eintippen" />
-            <div class="small muted2" style="margin-top:6px;">Nur Zahlen. Optional – du kannst auch ohne Barcode weitermachen.</div>
-          </div>
+        <div class="scan-result" id="scan-result">
+          <span class="small muted2">Noch kein Barcode erkannt.</span>
         </div>
 
         <div id="scan-msg" class="small" style="margin-top:10px; color: rgba(239,68,68,0.9);"></div>
@@ -232,7 +227,7 @@
         </div>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
           <button class="info" data-action="rescan">Neu scannen</button>
-          <button class="success" data-action="next">Weiter</button>
+          <button class="success" data-action="next" disabled>Weiter</button>
         </div>
       </div>
     `;
@@ -241,15 +236,17 @@
     document.body.appendChild(overlay);
 
     const video = modal.querySelector("#scan-video");
-    const codeInput = modal.querySelector("#scan-code");
     const msg = modal.querySelector("#scan-msg");
     const hint = modal.querySelector(".scan-hint");
+    const result = modal.querySelector("#scan-result");
+    const nextBtn = modal.querySelector('button[data-action="next"]');
 
     let stream = null;
     let detector = null;
     let raf = null;
     let scanning = false;
     let lastTick = 0;
+    let scannedCode = "";
 
     function setMsg(text, kind = "error") {
       if (!msg) return;
@@ -257,11 +254,28 @@
       msg.textContent = text || "";
     }
 
+    function setResult(code) {
+      if (!result) return;
+      if (!code) {
+        result.innerHTML = `<span class="small muted2">Noch kein Barcode erkannt.</span>`;
+        return;
+      }
+      result.innerHTML = `
+        <div class="small muted2" style="margin-bottom:6px;">Erkannt</div>
+        <div style="font-size:18px; font-weight:800; letter-spacing:0.5px;">${esc(code)}</div>
+      `;
+    }
+
+    function setNextEnabled(on) {
+      if (nextBtn) nextBtn.disabled = !on;
+    }
+
     async function startCamera() {
       if (!video) return;
 
       if (!navigator.mediaDevices?.getUserMedia) {
-        setMsg("Kamera wird vom Browser nicht unterstützt. Barcode bitte eintippen.", "warn");
+        if (hint) hint.textContent = "Kamera wird vom Browser nicht unterstützt.";
+        setMsg("Kamera wird vom Browser nicht unterstützt. Nutze ‚Ohne Barcode‘.", "warn");
         return;
       }
 
@@ -278,7 +292,8 @@
         video.srcObject = stream;
         await video.play();
       } catch (e) {
-        setMsg("Kamera-Zugriff nicht möglich. Du kannst den Barcode unten eintippen.", "warn");
+        if (hint) hint.textContent = "Kamera-Zugriff blockiert. Erlaube Kamera in den Website-Einstellungen.";
+        setMsg("Kamera-Zugriff nicht möglich. Erlaube Kamera – oder nutze ‚Ohne Barcode‘.", "warn");
       }
     }
 
@@ -301,7 +316,6 @@
       if (detector) return detector;
       if (typeof BarcodeDetector === "undefined") return null;
       try {
-        // EAN/UPC sind für Lebensmittel der Normalfall
         detector = new BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128"] });
         return detector;
       } catch {
@@ -313,18 +327,17 @@
       if (!scanning) return;
       raf = requestAnimationFrame(tick);
 
-      // throttle
       if (ts - lastTick < 160) return;
       lastTick = ts;
 
       const det = await ensureDetector();
       if (!det || !video) {
         scanning = false;
-        if (hint) hint.textContent = "Scanner wird auf diesem Gerät nicht unterstützt. Bitte Barcode eintippen.";
+        if (hint) hint.textContent = "Scanner wird auf diesem Gerät nicht unterstützt. Nutze ‚Ohne Barcode‘.";
+        setMsg("Scanner nicht unterstützt. Nutze ‚Ohne Barcode‘.", "warn");
         return;
       }
 
-      // Nur scannen, wenn Video „ready“ ist
       if (video.readyState < 2) return;
 
       try {
@@ -333,8 +346,10 @@
           const raw = res[0]?.rawValue || "";
           const code = cleanBarcode(raw);
           if (code) {
-            codeInput.value = code;
+            scannedCode = code;
+            setResult(code);
             setMsg(`Erkannt: ${code}`, "ok");
+            setNextEnabled(true);
             scanning = false;
           }
         }
@@ -374,29 +389,26 @@
       }
 
       if (a === "rescan") {
-        codeInput.value = "";
+        scannedCode = "";
+        setResult("");
         setMsg("");
+        setNextEnabled(false);
         startScan();
-        codeInput.focus();
         return;
       }
 
       if (a === "next") {
-        const raw = codeInput.value || "";
-        const code = cleanBarcode(raw);
-
-        if (code && !isValidBarcode(code)) {
-          setMsg("Barcode sieht komisch aus. Bitte EAN/UPC (8–14 Ziffern) eingeben oder ‚Ohne Barcode‘.");
+        if (!scannedCode) {
+          setMsg("Noch kein Barcode erkannt. Bitte kurz warten oder ‚Ohne Barcode‘.", "warn");
           return;
         }
 
+        const code = scannedCode;
+
         // Optional: Duplikat-Hinweis
-        if (code) {
-          const dupe = (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === code);
-          if (dupe) {
-            setMsg(`Barcode ist schon bei „${dupe.name}“ gespeichert.`, "warn");
-            // trotzdem weiter erlauben – Validierung passiert im nächsten Modal
-          }
+        const dupe = (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === code);
+        if (dupe) {
+          setMsg(`Barcode ist schon bei „${dupe.name}“ gespeichert.`, "warn");
         }
 
         close();
@@ -406,12 +418,12 @@
 
     // Start
     setTimeout(async () => {
-      codeInput?.focus();
+      setResult("");
+      setNextEnabled(false);
       await startCamera();
       startScan();
     }, 0);
   }
-
   function openIngredientModal(state, persist, ingOrNull, opts = {}) {
     const isEdit = !!ingOrNull;
 
@@ -420,7 +432,7 @@
     const knownUnits = ["Stück", "g", "ml"];
     const hasCustom = unitNorm && !knownUnits.includes(unitNorm);
 
-    const preBarcode = String(opts?.prefillBarcode ?? ingOrNull?.barcode ?? "");
+    const preBarcode = cleanBarcode(String(opts?.prefillBarcode ?? ingOrNull?.barcode ?? ""));
 
     const unitOption = (value, label) =>
       `<option value="${esc(value)}" ${unitNorm === value ? "selected" : ""}>${esc(label)}</option>`;
@@ -432,17 +444,9 @@
           <input id="i-name" placeholder="z. B. Eier" value="${esc(ingOrNull?.name || "")}" />
         </div>
         <div>
-          <label class="small">Barcode (optional)</label><br/>
-          <input id="i-barcode" inputmode="numeric" placeholder="z. B. 4012345678901" value="${esc(preBarcode)}" />
-          <div class="small muted2" style="margin-top:6px;">Hilft später beim Scannen. Nur Zahlen.</div>
-        </div>
-        <div>
           <label class="small">Menge pro Packung</label><br/>
           <input id="i-amount" type="number" min="0" step="0.01" placeholder="z. B. 10" value="${esc(ingOrNull?.amount ?? "")}" />
         </div>
-      </div>
-
-      <div class="row" style="margin-top:10px;">
         <div>
           <label class="small">Einheit</label><br/>
           <select id="i-unit" style="width:100%;">
@@ -453,6 +457,9 @@
             ${hasCustom ? unitOption(unitNorm, `Andere: ${unitNorm}`) : ""}
           </select>
         </div>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
         <div>
           <label class="small">Preis pro Packung (€)</label><br/>
           <input id="i-price" type="number" min="0" step="0.01" placeholder="z. B. 2,99" value="${esc(ingOrNull?.price ?? "")}" />
@@ -461,6 +468,13 @@
           <label class="small">Haltbarkeit (Tage)</label><br/>
           <input id="i-shelf" type="number" min="0" step="1" placeholder="z. B. 7" value="${esc(ingOrNull?.shelfLifeDays ?? "")}" />
           <div class="small muted2" style="margin-top:6px;">Wird genutzt für Ablaufdatum beim Einkauf.</div>
+        </div>
+        <div>
+          <label class="small">Barcode</label><br/>
+          <div class="barcode-view" id="i-barcode-view">${preBarcode ? esc(preBarcode) : "—"}</div>
+          <input id="i-barcode" type="hidden" value="${esc(preBarcode)}" />
+          <div class="small muted2" style="margin-top:6px;">Automatisch beim Scannen. Manuelle Eingabe ist aus.</div>
+          ${preBarcode ? `<button type="button" class="danger" data-action="clearBarcode" style="margin-top:8px;">Barcode entfernen</button>` : ``}
         </div>
       </div>
 
@@ -486,16 +500,14 @@
         const shelf = Math.max(0, Math.round(toNum(m.querySelector("#i-shelf")?.value) || 0));
 
         if (!name) return (msg.textContent = "Bitte Name eingeben.");
-        if (barcode && !isValidBarcode(barcode)) return (msg.textContent = "Barcode muss EAN/UPC (8–14 Ziffern) sein – oder leer lassen.");
+        if (barcode && !isValidBarcode(barcode)) return (msg.textContent = "Barcode ist ungültig (8–14 Ziffern). Bitte entfernen.");
 
-        const dup = barcode
-          ? (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === barcode && x.id !== ingOrNull?.id)
-          : null;
+        const dup = barcode ? (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === barcode && x.id !== ingOrNull?.id) : null;
         if (dup) return (msg.textContent = `Barcode ist schon bei „${dup.name}“ gespeichert.`);
 
         if (!Number.isFinite(amount) || amount <= 0) return (msg.textContent = "Bitte Menge pro Packung > 0 eingeben.");
-        if (!unit) return (msg.textContent = "Bitte Einheit wählen (Stück / g / ml).");
-        if (!Number.isFinite(price) || price < 0) return (msg.textContent = "Bitte Preis eingeben (0 oder größer).");
+        if (!unit) return (msg.textContent = "Bitte Einheit wählen (Stück / g / ml)." );
+        if (!Number.isFinite(price) || price < 0) return (msg.textContent = "Bitte Preis eingeben (0 oder größer)." );
 
         if (isEdit) {
           const it = state.ingredients.find((x) => x.id === ingOrNull.id);
@@ -530,9 +542,21 @@
       }
     });
 
+    // Barcode entfernen ohne Tastatur
+    modal.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-action=clearBarcode]");
+      if (!b) return;
+      const hidden = modal.querySelector("#i-barcode");
+      const view = modal.querySelector("#i-barcode-view");
+      if (hidden) hidden.value = "";
+      if (view) view.textContent = "—";
+      b.remove();
+    });
+
     // Fokus
     setTimeout(() => modal.querySelector("#i-name")?.focus(), 0);
   }
+
 
   function openDeleteModal(state, persist, ingredientId) {
     const ing = (state.ingredients || []).find((x) => x.id === ingredientId);
