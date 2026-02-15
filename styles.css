@@ -633,6 +633,16 @@ button.warn:hover { background: rgba(245,158,11,0.16); }
   flex-wrap:wrap;
 }
 .modal-close{ min-width:40px; }
+/* Barcode-Scanner Modal */
+.scan-modal{ max-height:90vh; }
+.scan-video{ width:100%; max-height:320px; object-fit:cover; border-radius:12px; border:1px solid var(--border); background:#000; }
+.scan-video-wrap{ display:flex; flex-direction:column; gap:10px; }
+.scan-hint{ opacity:0.85; }
+@media (max-width:520px){
+  .scan-modal{ height: calc(100vh - 16px); max-height:none; }
+  .scan-video{ max-height:44vh; }
+}
+
 
 
 /* --- Chips (z.B. „Geplante Rezepte“) --- */
