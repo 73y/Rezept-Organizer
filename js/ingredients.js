@@ -247,6 +247,7 @@
     let scanning = false;
     let lastTick = 0;
     let scannedCode = "";
+    let matchedIng = null;
 
     function setMsg(text, kind = "error") {
       if (!msg) return;
@@ -254,20 +255,37 @@
       msg.textContent = text || "";
     }
 
-    function setResult(code) {
+    function setResult(code, ing) {
       if (!result) return;
       if (!code) {
-        result.innerHTML = `<span class="small muted2">Noch kein Barcode erkannt.</span>`;
+        result.innerHTML = `<span class=\"small muted2\">Noch kein Barcode erkannt.</span>`;
         return;
       }
+
+      if (ing) {
+        const packLabel = `${Number(ing.amount) || 0} ${esc(ing.unit || "")}`.trim();
+        result.innerHTML = `
+          <div class=\"small muted2\" style=\"margin-bottom:6px;\">Erkannt</div>
+          <div style=\"font-size:18px; font-weight:900;\">${esc(ing.name)}</div>
+          <div class=\"small muted2\" style=\"margin-top:6px;\">Packung: <b>${esc(packLabel)}</b> · Barcode: <b>${esc(code)}</b></div>
+        `;
+        return;
+      }
+
       result.innerHTML = `
-        <div class="small muted2" style="margin-bottom:6px;">Erkannt</div>
-        <div style="font-size:18px; font-weight:800; letter-spacing:0.5px;">${esc(code)}</div>
+        <div class=\"small muted2\" style=\"margin-bottom:6px;\">Unbekannt</div>
+        <div style=\"font-size:18px; font-weight:900; letter-spacing:0.5px;\">${esc(code)}</div>
+        <div class=\"small muted2\" style=\"margin-top:6px;\">Du kannst jetzt eine neue Zutat anlegen und den Barcode speichern.</div>
       `;
     }
 
     function setNextEnabled(on) {
       if (nextBtn) nextBtn.disabled = !on;
+    }
+
+    function setNextLabel(label) {
+      if (!nextBtn) return;
+      nextBtn.textContent = label;
     }
 
     async function startCamera() {
@@ -347,8 +365,15 @@
           const code = cleanBarcode(raw);
           if (code) {
             scannedCode = code;
-            setResult(code);
-            setMsg(`Erkannt: ${code}`, "ok");
+            matchedIng = (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === code) || null;
+            setResult(code, matchedIng);
+            if (matchedIng) {
+              setMsg(`Erkannt: ${matchedIng.name}`, "ok");
+              setNextLabel("Bearbeiten");
+            } else {
+              setMsg(`Unbekannt: ${code}`, "ok");
+              setNextLabel("Zutat anlegen");
+            }
             setNextEnabled(true);
             scanning = false;
           }
@@ -390,8 +415,10 @@
 
       if (a === "rescan") {
         scannedCode = "";
-        setResult("");
+        matchedIng = null;
+        setResult("", null);
         setMsg("");
+        setNextLabel("Weiter");
         setNextEnabled(false);
         startScan();
         return;
@@ -405,20 +432,23 @@
 
         const code = scannedCode;
 
-        // Optional: Duplikat-Hinweis
-        const dupe = (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === code);
-        if (dupe) {
-          setMsg(`Barcode ist schon bei „${dupe.name}“ gespeichert.`, "warn");
+        // Wenn schon bekannt: direkt bearbeiten
+        const existing = matchedIng || (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === code) || null;
+        close();
+
+        if (existing) {
+          openIngredientModal(state, persist, existing, { prefillBarcode: code });
+          return;
         }
 
-        close();
         openIngredientModal(state, persist, null, { prefillBarcode: code });
       }
     });
 
     // Start
     setTimeout(async () => {
-      setResult("");
+      setResult("", null);
+      setNextLabel("Weiter");
       setNextEnabled(false);
       await startCamera();
       startScan();

@@ -116,8 +116,8 @@ function defaultState() {
 function migrateIngredient(old) {
   // Neues Format schon vorhanden?
   if (old && typeof old === "object" && "amount" in old && "unit" in old && "price" in old) {
-    const barcode = old.barcode == null ? "" : String(old.barcode).trim();
-    return { ...old, barcode };
+    const barcode = (String(old.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
+    return { ...old, barcode: barcode || "" };
   }
 
   const id = old?.id ?? (window.crypto?.randomUUID ? crypto.randomUUID() : "id_" + Date.now());
@@ -128,7 +128,7 @@ function migrateIngredient(old) {
   const price = Number(old?.packPrice ?? 0);
   const shelfLifeDays = Number(old?.shelfLifeDays ?? 0);
 
-  const barcode = old?.barcode == null ? "" : String(old.barcode).trim();
+  const barcode = (String(old?.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
 
   return { id, name, barcode, amount, unit, price, shelfLifeDays };
 }
