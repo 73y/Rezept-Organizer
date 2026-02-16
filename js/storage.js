@@ -109,15 +109,44 @@ function defaultState() {
     purchaseLog: [],
     wasteLog: [],
     shoppingSession: { active: false, checked: {}, startedAt: null },
-    settings: { enableCookTimer: true, theme: "dark" }
+    settings: { enableCookTimer: true, theme: "dark" },
+
+    // Cache für Barcode->Produkt (Open Food Facts Autofill)
+    barcodeLookupCache: {}
   };
+}
+
+
+function sanitizeNutriments(n) {
+  if (!n || typeof n !== "object") return null;
+
+  const base = (String(n.base || "").trim() === "100ml") ? "100ml" : "100g";
+
+  const pick = (key) => {
+    const v = Number(n[key]);
+    return Number.isFinite(v) ? Math.round(v * 10) / 10 : null;
+  };
+
+  const out = {
+    base,
+    kcalPer100: pick("kcalPer100"),
+    proteinPer100: pick("proteinPer100"),
+    carbsPer100: pick("carbsPer100"),
+    fatPer100: pick("fatPer100"),
+    sugarPer100: pick("sugarPer100"),
+    fiberPer100: pick("fiberPer100"),
+    saltPer100: pick("saltPer100")
+  };
+
+  const has = Object.keys(out).some((k) => k !== "base" && out[k] !== null);
+  return has ? out : null;
 }
 
 function migrateIngredient(old) {
   // Neues Format schon vorhanden?
   if (old && typeof old === "object" && "amount" in old && "unit" in old && "price" in old) {
     const barcode = (String(old.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
-    return { ...old, barcode: barcode || "" };
+    return { ...old, barcode: barcode || "", nutriments: sanitizeNutriments(old.nutriments) };
   }
 
   const id = old?.id ?? (window.crypto?.randomUUID ? crypto.randomUUID() : "id_" + Date.now());
@@ -130,7 +159,7 @@ function migrateIngredient(old) {
 
   const barcode = (String(old?.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
 
-  return { id, name, barcode, amount, unit, price, shelfLifeDays };
+  return { id, name, barcode, amount, unit, price, shelfLifeDays, nutriments: sanitizeNutriments(old?.nutriments) };
 }
 
 function ensureStateShape(state) {
@@ -159,6 +188,10 @@ function ensureStateShape(state) {
   next.pantry = Array.isArray(next.pantry) ? next.pantry : [];
   next.purchaseLog = Array.isArray(next.purchaseLog) ? next.purchaseLog : [];
   next.wasteLog = Array.isArray(next.wasteLog) ? next.wasteLog : [];
+
+  // ✅ Barcode Cache normalisieren
+  next.barcodeLookupCache = next.barcodeLookupCache && typeof next.barcodeLookupCache === "object" ? next.barcodeLookupCache : {};
+
 
   if (!next.shoppingSession || typeof next.shoppingSession !== "object") {
     next.shoppingSession = { active: false, checked: {}, startedAt: null };

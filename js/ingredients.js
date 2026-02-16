@@ -28,6 +28,154 @@
     return !!c && c.length >= 8 && c.length <= 14;
   };
 
+
+
+  // Open Food Facts Autofill (Barcode -> Name/Packung)
+  const OFF_FIELDS = "product_name,product_name_de,quantity,product_quantity,product_quantity_unit,brands,nutriments";
+  const OFF_BASE = "https://world.openfoodfacts.org/api/v2/product/";
+
+  function ensureLookupCache(state) {
+    if (!state || typeof state !== "object") return {};
+    if (!state.barcodeLookupCache || typeof state.barcodeLookupCache !== "object") state.barcodeLookupCache = {};
+    return state.barcodeLookupCache;
+  }
+
+  function parseOffQuantity(qty, unitRaw) {
+    const n = Number(qty);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const u = String(unitRaw || "").trim().toLowerCase();
+
+    // weight
+    if (u === "g" || u === "gram" || u === "grams") return { amount: n, unit: "g" };
+    if (u === "kg" || u === "kilogram" || u === "kilograms") return { amount: n * 1000, unit: "g" };
+
+    // volume
+    if (u === "ml" || u === "milliliter" || u === "milliliters") return { amount: n, unit: "ml" };
+    if (u === "l" || u === "lt" || u === "liter" || u === "liters") return { amount: n * 1000, unit: "ml" };
+    if (u === "cl") return { amount: n * 10, unit: "ml" };
+    if (u === "dl") return { amount: n * 100, unit: "ml" };
+
+    // pieces
+    if (u === "pcs" || u === "pc" || u === "piece" || u === "pieces" || u === "stk" || u.includes("stück")) return { amount: n, unit: "Stück" };
+
+    return null;
+  }
+
+  function parseQuantityString(text) {
+    const raw = String(text || "").trim().toLowerCase();
+    if (!raw) return null;
+
+    // multipack: 6x250 g -> wir nehmen 250 g als Packungsgröße
+    const multi = raw.match(/(\d+(?:[\.,]\d+)?)\s*[x×]\s*(\d+(?:[\.,]\d+)?)\s*([a-zäöü]+)/i);
+    if (multi) {
+      const qty = Number(String(multi[2]).replace(",", "."));
+      const unit = multi[3];
+      return parseOffQuantity(qty, unit);
+    }
+
+    // normal: 200 g / 1l / 0.5 l
+    const m = raw.match(/(\d+(?:[\.,]\d+)?)\s*([a-zäöü]+)/i);
+    if (!m) return null;
+    const qty = Number(String(m[1]).replace(",", "."));
+    const unit = m[2];
+    return parseOffQuantity(qty, unit);
+  }
+
+  function round1(n) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return null;
+    return Math.round(x * 10) / 10;
+  }
+
+  function pickNutri(nutr, keyBase, preferMl) {
+    if (!nutr || typeof nutr !== "object") return null;
+    const a = preferMl ? `${keyBase}_100ml` : `${keyBase}_100g`;
+    const b = preferMl ? `${keyBase}_100g` : `${keyBase}_100ml`;
+    const v1 = nutr[a];
+    if (Number.isFinite(Number(v1))) return Number(v1);
+    const v2 = nutr[b];
+    if (Number.isFinite(Number(v2))) return Number(v2);
+    return null;
+  }
+
+  function pickKcal(nutr, preferMl) {
+    // 1) direkt kcal
+    const kcal = pickNutri(nutr, "energy-kcal", preferMl);
+    if (kcal !== null) return kcal;
+
+    // 2) fallback: kJ -> kcal (1 kJ = 0.239006 kcal)
+    const kj = pickNutri(nutr, "energy", preferMl);
+    if (kj !== null) return Number(kj) * 0.239006;
+
+    return null;
+  }
+
+  async function fetchOffSuggestion(state, persist, barcode) {
+    const code = cleanBarcode(barcode);
+    if (!isValidBarcode(code)) return null;
+
+    const cache = ensureLookupCache(state);
+    const cached = cache[code];
+    if (cached && typeof cached === "object" && (cached.name || (cached.amount && cached.unit))) return cached;
+
+    try {
+      const url = `${OFF_BASE}${encodeURIComponent(code)}?fields=${OFF_FIELDS}`;
+      const res = await fetch(url, { method: "GET" });
+      if (!res.ok) return null;
+      const json = await res.json();
+
+      if (!json || typeof json !== "object") return null;
+      if (json.status === 0) return null;
+
+      const prod = json.product && typeof json.product === "object" ? json.product : null;
+      if (!prod) return null;
+
+      const name = String(prod.product_name_de || prod.product_name || "").trim();
+      const brands = String(prod.brands || "").trim();
+
+      let parsed = null;
+      if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(prod.product_quantity, prod.product_quantity_unit);
+      if (!parsed && prod.quantity) parsed = parseQuantityString(prod.quantity);
+
+      const out = {
+        name: name || "",
+        brands: brands || "",
+        amount: parsed?.amount ? Math.round(parsed.amount * 100) / 100 : null,
+        unit: parsed?.unit || "",
+        rawQuantity: String(prod.quantity || "").trim(),
+        nutriments: (() => {
+          const nutr = prod.nutriments && typeof prod.nutriments === "object" ? prod.nutriments : null;
+          const preferMl = (parsed?.unit || "") === "ml";
+          const kcal = round1(pickKcal(nutr, preferMl));
+          const protein = round1(pickNutri(nutr, "proteins", preferMl));
+          const carbs = round1(pickNutri(nutr, "carbohydrates", preferMl));
+          const fat = round1(pickNutri(nutr, "fat", preferMl));
+          const sugar = round1(pickNutri(nutr, "sugars", preferMl));
+          const fiber = round1(pickNutri(nutr, "fiber", preferMl));
+          const salt = round1(pickNutri(nutr, "salt", preferMl));
+          if (kcal === null && protein === null && carbs === null && fat === null && sugar === null && fiber === null && salt === null) return null;
+          return {
+            base: preferMl ? "100ml" : "100g",
+            kcalPer100: kcal,
+            proteinPer100: protein,
+            carbsPer100: carbs,
+            fatPer100: fat,
+            sugarPer100: sugar,
+            fiberPer100: fiber,
+            saltPer100: salt
+          };
+        })(),
+        fetchedAt: new Date().toISOString()
+      };
+
+      cache[code] = out;
+      if (typeof persist === "function") persist();
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
   const ui = {
     openIngredientMenus: new Set(),
     packsByIngredient: new Map(),
@@ -248,6 +396,7 @@
     let lastTick = 0;
     let scannedCode = "";
     let matchedIng = null;
+    let offSuggestion = null;
 
     function setMsg(text, kind = "error") {
       if (!msg) return;
@@ -255,7 +404,7 @@
       msg.textContent = text || "";
     }
 
-    function setResult(code, ing) {
+    function setResult(code, ing, off = null, loading = false) {
       if (!result) return;
       if (!code) {
         result.innerHTML = `<span class=\"small muted2\">Noch kein Barcode erkannt.</span>`;
@@ -272,10 +421,35 @@
         return;
       }
 
+      const hasOff = !!(off && (off.name || (off.amount && off.unit)));
+      const extra = loading
+        ? `<div class=\"small muted2\" style=\"margin-top:10px; border-top:1px solid var(--border); padding-top:10px;\">Suche Produktdaten…</div>`
+        : hasOff
+          ? `
+            <div class=\"small\" style=\"margin-top:10px; border-top:1px solid var(--border); padding-top:10px;\">
+              <div class=\"small muted2\" style=\"margin-bottom:6px;\">Vorschlag (Open Food Facts)</div>
+              ${off.name ? `<div style=\"font-weight:900;\">${esc(off.name)}</div>` : ``}
+              ${(off.amount && off.unit) ? `<div class=\"small muted2\" style=\"margin-top:6px;\">Packung: <b>${esc(off.amount)} ${esc(off.unit)}</b></div>` : ``}
+              ${off.brands ? `<div class=\"small muted2\" style=\"margin-top:6px;\">Marke: ${esc(off.brands)}</div>` : ``}
+              ${off.nutriments ? (() => {
+                  const n = off.nutriments;
+                  const parts = [];
+                  if (Number.isFinite(n.kcalPer100)) parts.push(`${esc(n.kcalPer100)} kcal/${esc(n.base)}`);
+                  if (Number.isFinite(n.proteinPer100)) parts.push(`Protein ${esc(n.proteinPer100)} g`);
+                  if (Number.isFinite(n.carbsPer100)) parts.push(`KH ${esc(n.carbsPer100)} g`);
+                  if (Number.isFinite(n.fatPer100)) parts.push(`Fett ${esc(n.fatPer100)} g`);
+                  if (!parts.length) return ``;
+                  return `<div class=\"small muted2\" style=\"margin-top:6px;\">Nährwerte: ${parts.join(" · ")}</div>`;
+                })() : ``}
+            </div>
+          `
+          : ``;
+
       result.innerHTML = `
         <div class=\"small muted2\" style=\"margin-bottom:6px;\">Unbekannt</div>
         <div style=\"font-size:18px; font-weight:900; letter-spacing:0.5px;\">${esc(code)}</div>
-        <div class=\"small muted2\" style=\"margin-top:6px;\">Du kannst jetzt eine neue Zutat anlegen und den Barcode speichern.</div>
+        <div class=\"small muted2\" style=\"margin-top:6px;\">Du kannst jetzt eine neue Zutat anlegen.</div>
+        ${extra}
       `;
     }
 
@@ -366,16 +540,35 @@
           if (code) {
             scannedCode = code;
             matchedIng = (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === code) || null;
-            setResult(code, matchedIng);
+            offSuggestion = null;
+
             if (matchedIng) {
+              setResult(code, matchedIng, null, false);
               setMsg(`Erkannt: ${matchedIng.name}`, "ok");
               setNextLabel("Bearbeiten");
+              setNextEnabled(true);
+              scanning = false;
+              return;
+            }
+
+            // Unbekannt -> Open Food Facts Autofill versuchen
+            setResult(code, null, null, true);
+            setMsg("Suche Produktdaten…", "warn");
+            setNextEnabled(false);
+            scanning = false;
+
+            offSuggestion = await fetchOffSuggestion(state, persist, code);
+
+            if (offSuggestion) {
+              setResult(code, null, offSuggestion, false);
+              setMsg(offSuggestion.name ? ("Vorschlag gefunden: " + offSuggestion.name) : "Vorschlag gefunden", "ok");
+              setNextLabel("Übernehmen");
             } else {
+              setResult(code, null, null, false);
               setMsg(`Unbekannt: ${code}`, "ok");
               setNextLabel("Zutat anlegen");
             }
             setNextEnabled(true);
-            scanning = false;
           }
         }
       } catch {
@@ -416,6 +609,7 @@
       if (a === "rescan") {
         scannedCode = "";
         matchedIng = null;
+        offSuggestion = null;
         setResult("", null);
         setMsg("");
         setNextLabel("Weiter");
@@ -441,7 +635,7 @@
           return;
         }
 
-        openIngredientModal(state, persist, null, { prefillBarcode: code });
+        openIngredientModal(state, persist, null, { prefillBarcode: code, prefillName: offSuggestion?.name || "", prefillAmount: offSuggestion?.amount || "", prefillUnit: offSuggestion?.unit || "", prefillBrands: offSuggestion?.brands || "", prefillNutriments: offSuggestion?.nutriments || null });
       }
     });
 
@@ -458,7 +652,8 @@
     const isEdit = !!ingOrNull;
 
     const unitRaw = String(ingOrNull?.unit || "").trim();
-    const unitNorm = normalizeUnit(unitRaw);
+    const preUnitRaw = !isEdit ? String(opts?.prefillUnit ?? "").trim() : "";
+    const unitNorm = normalizeUnit(isEdit ? unitRaw : (preUnitRaw || unitRaw));
     const knownUnits = ["Stück", "g", "ml"];
     const hasCustom = unitNorm && !knownUnits.includes(unitNorm);
 
@@ -471,11 +666,11 @@
       <div class="row">
         <div>
           <label class="small">Name</label><br/>
-          <input id="i-name" placeholder="z. B. Eier" value="${esc(ingOrNull?.name || "")}" />
+          <input id="i-name" placeholder="z. B. Eier" value="${esc(isEdit ? (ingOrNull?.name || "") : (opts?.prefillName || ""))}" />
         </div>
         <div>
           <label class="small">Menge pro Packung</label><br/>
-          <input id="i-amount" type="number" min="0" step="0.01" placeholder="z. B. 10" value="${esc(ingOrNull?.amount ?? "")}" />
+          <input id="i-amount" type="number" min="0" step="0.01" placeholder="z. B. 10" value="${esc(isEdit ? (ingOrNull?.amount ?? "") : (opts?.prefillAmount ?? ""))}" />
         </div>
         <div>
           <label class="small">Einheit</label><br/>
@@ -488,6 +683,8 @@
           </select>
         </div>
       </div>
+
+      ${(!isEdit && (opts?.prefillName || opts?.prefillAmount)) ? `<div class="small muted2" style="margin-top:8px;">Vorschlag aus Barcode-Daten übernommen. Preis/Haltbarkeit ggf. ergänzen.</div>` : ``}
 
       <div class="row" style="margin-top:10px;">
         <div>
@@ -508,7 +705,45 @@
         </div>
       </div>
 
-      <div class="small" id="i-msg" style="margin-top:10px; color: rgba(239,68,68,0.9);"></div>
+      
+      <details class="nutri-details" style="margin-top:12px;">
+        <summary class="small">Nährwerte (optional)</summary>
+        <div class="small muted2" style="margin-top:6px;">Pro ${esc((() => {
+          const u = normalizeUnit(isEdit ? unitRaw : (String(opts?.prefillUnit ?? "").trim() || unitRaw));
+          return u === "ml" ? "100ml" : "100g";
+        })())}. Werte sind optional und können später ergänzt werden.</div>
+        <div class="row" style="margin-top:10px;">
+          <div>
+            <label class="small">kcal</label><br/>
+            <input id="i-kcal" type="number" min="0" step="0.1" placeholder="z. B. 250" value="${esc((() => {
+              const n = isEdit ? ingOrNull?.nutriments : (opts?.prefillNutriments || null);
+              return n && Number.isFinite(Number(n.kcalPer100)) ? Number(n.kcalPer100) : "";
+            })())}" />
+          </div>
+          <div>
+            <label class="small">Protein (g)</label><br/>
+            <input id="i-protein" type="number" min="0" step="0.1" placeholder="z. B. 10" value="${esc((() => {
+              const n = isEdit ? ingOrNull?.nutriments : (opts?.prefillNutriments || null);
+              return n && Number.isFinite(Number(n.proteinPer100)) ? Number(n.proteinPer100) : "";
+            })())}" />
+          </div>
+          <div>
+            <label class="small">Kohlenhydrate (g)</label><br/>
+            <input id="i-carbs" type="number" min="0" step="0.1" placeholder="z. B. 5" value="${esc((() => {
+              const n = isEdit ? ingOrNull?.nutriments : (opts?.prefillNutriments || null);
+              return n && Number.isFinite(Number(n.carbsPer100)) ? Number(n.carbsPer100) : "";
+            })())}" />
+          </div>
+          <div>
+            <label class="small">Fett (g)</label><br/>
+            <input id="i-fat" type="number" min="0" step="0.1" placeholder="z. B. 20" value="${esc((() => {
+              const n = isEdit ? ingOrNull?.nutriments : (opts?.prefillNutriments || null);
+              return n && Number.isFinite(Number(n.fatPer100)) ? Number(n.fatPer100) : "";
+            })())}" />
+          </div>
+        </div>
+      </details>
+<div class="small" id="i-msg" style="margin-top:10px; color: rgba(239,68,68,0.9);"></div>
     `;
 
     const { modal } = buildModal({
@@ -528,6 +763,24 @@
         const unit = normalizeUnit(m.querySelector("#i-unit")?.value);
         const price = toNum(m.querySelector("#i-price")?.value);
         const shelf = Math.max(0, Math.round(toNum(m.querySelector("#i-shelf")?.value) || 0));
+        const kcal = toNum(m.querySelector("#i-kcal")?.value);
+        const protein = toNum(m.querySelector("#i-protein")?.value);
+        const carbs = toNum(m.querySelector("#i-carbs")?.value);
+        const fat = toNum(m.querySelector("#i-fat")?.value);
+
+        const nutriBase = (unit === "ml") ? "100ml" : "100g";
+        const nutriments = (() => {
+          const out = {
+            base: nutriBase,
+            kcalPer100: Number.isFinite(kcal) ? Math.round(kcal * 10) / 10 : null,
+            proteinPer100: Number.isFinite(protein) ? Math.round(protein * 10) / 10 : null,
+            carbsPer100: Number.isFinite(carbs) ? Math.round(carbs * 10) / 10 : null,
+            fatPer100: Number.isFinite(fat) ? Math.round(fat * 10) / 10 : null
+          };
+          if (out.kcalPer100 === null && out.proteinPer100 === null && out.carbsPer100 === null && out.fatPer100 === null) return null;
+          return out;
+        })();
+
 
         if (!name) return (msg.textContent = "Bitte Name eingeben.");
         if (barcode && !isValidBarcode(barcode)) return (msg.textContent = "Barcode ist ungültig (8–14 Ziffern). Bitte entfernen.");
@@ -549,6 +802,7 @@
           it.unit = unit;
           it.price = Number((price || 0).toFixed(2));
           it.shelfLifeDays = shelf;
+          it.nutriments = nutriments || null;
 
           persist();
           close();
@@ -563,7 +817,8 @@
           amount,
           unit,
           price: Number((price || 0).toFixed(2)),
-          shelfLifeDays: shelf
+          shelfLifeDays: shelf,
+          nutriments: nutriments || null
         });
 
         persist();
