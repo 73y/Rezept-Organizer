@@ -670,6 +670,34 @@ button.warn:hover { background: rgba(245,158,11,0.16); }
   max-width:100%;
 }
 
+/* Horizontal scrollable Filter-Chips */
+.chipbar{
+  display:flex;
+  gap:8px;
+  align-items:center;
+  overflow-x:auto;
+  padding-bottom:4px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.chipbtn{
+  flex:0 0 auto;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  font-size:12px;
+  white-space:nowrap;
+}
+
+.chipbtn.active{
+  border-color: rgba(255,255,255,0.6);
+}
+
+html[data-theme="light"] .chipbtn.active{
+  border-color: rgba(17,24,39,0.7);
+}
+
 button.chip-x{
   padding:0 8px;
   height:22px;

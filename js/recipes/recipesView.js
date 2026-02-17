@@ -8,7 +8,10 @@
   const euro = (n) => (window.utils?.euro ? window.utils.euro(n) : window.models.euro(n));
 
   const ui = {
-    openRecipeMenus: new Set()
+    openRecipeMenus: new Set(),
+
+    // 0.3.0 Filter
+    filterCat: "all" // "all" | "none" | <categoryId>
   };
 
   function fmt(n) {
@@ -125,8 +128,154 @@
 
   function ingredientOptionsHTML(state, selectedId) {
     return ingredientsSorted(state)
-      .map((ing) => `<option value="${esc(ing.id)}" ${ing.id === selectedId ? "selected" : ""}>${esc(ing.name)}</option>`)
+      .map((ing) => {
+        const label = `${ing.name}${ing.unlisted ? " (ungelistet)" : ""}`;
+        return `<option value="${esc(ing.id)}" ${ing.id === selectedId ? "selected" : ""}>${esc(label)}</option>`;
+      })
       .join("");
+  }
+
+  // 0.3.0 Kategorien (Rezepte)
+  function recipeCategoriesSorted(state) {
+    const cats = Array.isArray(state.recipeCategories) ? state.recipeCategories : [];
+    return cats.slice().sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
+  }
+
+  function recipeCategorySelectOptionsHTML(state, selectedId) {
+    const cats = recipeCategoriesSorted(state);
+    const sel = String(selectedId || "");
+    const opts = [`<option value="" ${sel ? "" : "selected"}>Ohne Kategorie</option>`];
+    for (const c of cats) {
+      opts.push(`<option value="${esc(c.id)}" ${String(c.id) === sel ? "selected" : ""}>${esc(c.name)}</option>`);
+    }
+    return opts.join("");
+  }
+
+  function openRecipeCategoriesModal(state, persist) {
+    if (!Array.isArray(state.recipeCategories)) state.recipeCategories = [];
+
+    const cats = recipeCategoriesSorted(state);
+    const rows = cats
+      .map(
+        (c) => `
+        <div class="row" style="margin:8px 0; align-items:center;">
+          <div style="min-width:220px; flex:1;">
+            <input data-role="catName" data-id="${esc(c.id)}" value="${esc(c.name)}" />
+          </div>
+          <div style="flex:0 0 auto;">
+            <button type="button" class="danger" data-action="catDel" data-id="${esc(c.id)}">Löschen</button>
+          </div>
+        </div>
+      `
+      )
+      .join("");
+
+    const content = `
+      <div class="small muted2">Kategorien für Rezepte. Beim Löschen wird die Kategorie bei betroffenen Rezepten entfernt.</div>
+      <div style="margin-top:12px;">
+        <label class="small">Neue Kategorie</label><br/>
+        <div class="row" style="align-items:center;">
+          <div style="flex:1; min-width:220px;"><input id="cat-new" placeholder="z. B. Meal Prep" /></div>
+          <div style="flex:0 0 auto;"><button type="button" class="info" data-action="catAdd">Hinzufügen</button></div>
+        </div>
+      </div>
+      <div style="margin-top:12px;">
+        <h3 style="margin:0 0 8px 0;">Liste</h3>
+        <div id="cat-list">${rows || `<div class="small">Noch keine Kategorien.</div>`}</div>
+      </div>
+      <div class="small" id="cat-msg" style="margin-top:10px; color: rgba(239,68,68,0.9);"></div>
+    `;
+
+    const { modal } = M().buildModal({
+      title: "Rezept-Kategorien",
+      contentHTML: content,
+      okText: "Speichern",
+      okClass: "success",
+      onConfirm: (m, close) => {
+        const msg = m.querySelector("#cat-msg");
+        if (msg) msg.textContent = "";
+
+        const inputs = Array.from(m.querySelectorAll("input[data-role=catName]"));
+        const next = [];
+        const used = new Set();
+
+        for (const inp of inputs) {
+          const id = String(inp.getAttribute("data-id") || "").trim();
+          const name = String(inp.value || "").trim();
+          if (!id) continue;
+          if (!name) continue;
+          const key = name.toLowerCase();
+          if (used.has(key)) {
+            if (msg) msg.textContent = `Doppelte Kategorie: „${name}“`;
+            return;
+          }
+          used.add(key);
+          next.push({ id, name });
+        }
+
+        next.sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
+        state.recipeCategories = next;
+
+        // Referenzen bereinigen
+        const valid = new Set(next.map((c) => String(c.id)));
+        for (const r of state.recipes || []) {
+          if (r?.categoryId && !valid.has(String(r.categoryId))) r.categoryId = null;
+        }
+
+        persist();
+        close();
+        window.app.navigate("recipes");
+      }
+    });
+
+    function rebuildList() {
+      const list = modal.querySelector("#cat-list");
+      if (!list) return;
+      const cats2 = recipeCategoriesSorted(state);
+      list.innerHTML =
+        cats2
+          .map(
+            (c) => `
+            <div class="row" style="margin:8px 0; align-items:center;">
+              <div style="min-width:220px; flex:1;">
+                <input data-role="catName" data-id="${esc(c.id)}" value="${esc(c.name)}" />
+              </div>
+              <div style="flex:0 0 auto;">
+                <button type="button" class="danger" data-action="catDel" data-id="${esc(c.id)}">Löschen</button>
+              </div>
+            </div>
+          `
+          )
+          .join("") || `<div class="small">Noch keine Kategorien.</div>`;
+    }
+
+    modal.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const a = btn.getAttribute("data-action");
+      const msg = modal.querySelector("#cat-msg");
+      if (msg) msg.textContent = "";
+
+      if (a === "catAdd") {
+        const inp = modal.querySelector("#cat-new");
+        const name = String(inp?.value || "").trim();
+        if (!name) return;
+        const dup = (state.recipeCategories || []).some((c) => String(c.name || "").trim().toLowerCase() === name.toLowerCase());
+        if (dup) {
+          if (msg) msg.textContent = "Kategorie existiert schon.";
+          return;
+        }
+        state.recipeCategories.push({ id: uid(), name });
+        if (inp) inp.value = "";
+        rebuildList();
+      }
+
+      if (a === "catDel") {
+        const id = btn.getAttribute("data-id") || "";
+        state.recipeCategories = (state.recipeCategories || []).filter((c) => String(c.id) !== String(id));
+        rebuildList();
+      }
+    });
   }
 
   function openRecipeEditorModal(state, persist, recipeOrNull) {
@@ -148,6 +297,15 @@
         <div>
           <label class="small">Zubereitungszeit (min)</label><br/>
           <input id="r-prep" type="number" min="0" step="1" value="${esc(recipeOrNull?.prepMinutes ?? "")}" />
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
+        <div>
+          <label class="small">Kategorie</label><br/>
+          <select id="r-cat" style="width:100%;">
+            ${recipeCategorySelectOptionsHTML(state, recipeOrNull?.categoryId)}
+          </select>
         </div>
       </div>
 
@@ -193,6 +351,7 @@
         const prep = Math.max(0, Math.round(toNum(m.querySelector("#r-prep")?.value) || 0));
         const description = (m.querySelector("#r-desc")?.value || "").trim();
         const instructions = (m.querySelector("#r-inst")?.value || "").trim();
+        const categoryId = (m.querySelector("#r-cat")?.value || "").trim() || null;
 
         if (!name) return (msg.textContent = "Bitte einen Namen eingeben.");
 
@@ -220,6 +379,7 @@
           r.description = description;
           r.instructions = instructions;
           r.items = items;
+          r.categoryId = categoryId;
 
           // Wenn Rezept geplant ist: Einkaufsliste ggf. anheben (niemals reduzieren)
           window.recipesLogic?.reconcileShoppingWithPlan?.(state, { mode: "raise" });
@@ -238,6 +398,7 @@
           description,
           instructions,
           items,
+          categoryId,
           cookHistory: []
         });
 
@@ -370,9 +531,22 @@
       if (!state.recipes.some((r) => r.id === id)) ui.openRecipeMenus.delete(id);
     }
 
-    const recipes = state.recipes
-      .slice()
-      .sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
+    const cats = recipeCategoriesSorted(state);
+    const validCatIds = new Set(cats.map((c) => String(c.id)));
+    if (ui.filterCat !== "all" && ui.filterCat !== "none" && !validCatIds.has(String(ui.filterCat))) ui.filterCat = "all";
+
+    let recipes = state.recipes.slice();
+    if (ui.filterCat === "none") recipes = recipes.filter((r) => !r?.categoryId);
+    else if (ui.filterCat !== "all") recipes = recipes.filter((r) => String(r?.categoryId || "") === String(ui.filterCat));
+    recipes = recipes.sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
+
+    const chip = (label, catId, active) =>
+      `<button type="button" class="chipbtn ${active ? "active" : ""}" data-action="filterCat" data-cat="${esc(catId)}">${esc(label)}</button>`;
+    const chipsHTML = [
+      chip("Alle", "all", ui.filterCat === "all"),
+      chip("Ohne Kategorie", "none", ui.filterCat === "none"),
+      ...cats.map((c) => chip(c.name, c.id, String(ui.filterCat) === String(c.id)))
+    ].join("");
 
     container.innerHTML = `
       <div class="card">
@@ -380,6 +554,11 @@
           <div>
             <h2 style="margin:0 0 6px 0;">Rezepte</h2>
             <p class="small" style="margin:0;">Einkaufsliste & Kochen sind direkt am Rezept. Bearbeiten/Löschen über „⋯“. Neues Rezept über „+“.</p>
+
+            <div class="chipbar" style="margin-top:10px;">
+              ${chipsHTML}
+              <button type="button" class="chipbtn" data-action="manageCats">Kategorien…</button>
+            </div>
           </div>
           <div class="small muted2" style="text-align:right;">${esc(recipes.length)} Rezept(e)</div>
         </div>
@@ -416,6 +595,17 @@
       if (!btn) return;
 
       const action = btn.getAttribute("data-action");
+
+      if (action === "filterCat") {
+        ui.filterCat = btn.getAttribute("data-cat") || "all";
+        window.app.navigate("recipes");
+        return;
+      }
+
+      if (action === "manageCats") {
+        openRecipeCategoriesModal(state, persist);
+        return;
+      }
 
       if (action === "openAdd") {
         openRecipeEditorModal(state, persist, null);

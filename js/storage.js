@@ -103,6 +103,9 @@ function defaultState() {
   return {
     ingredients: [], // {id,name,amount,unit,price,shelfLifeDays}
     recipes: [],
+    // 0.3.0 Kategorien
+    ingredientCategories: [], // [{id,name}]
+    recipeCategories: [], // [{id,name}]
     plannedRecipes: [],
     shopping: [],
     pantry: [],
@@ -146,22 +149,18 @@ function migrateIngredient(old) {
   // Neues Format schon vorhanden?
   if (old && typeof old === "object" && "amount" in old && "unit" in old && "price" in old) {
     const barcode = (String(old.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
-
-    const sanitizeIso = (v) => {
-      if (!v) return null;
-      const d = new Date(String(v));
-      return Number.isNaN(d.getTime()) ? null : d.toISOString();
-    };
-
-    const lastScannedAt = sanitizeIso(old.lastScannedAt);
-    const lastPriceAt = sanitizeIso(old.lastPriceAt);
-
     return {
       ...old,
       barcode: barcode || "",
       nutriments: sanitizeNutriments(old.nutriments),
-      lastScannedAt,
-      lastPriceAt
+
+      // 0.2.0 Zeitstempel
+      lastScannedAt: old.lastScannedAt ?? null,
+      lastPriceAt: old.lastPriceAt ?? null,
+
+      // 0.3.0 Kategorien
+      categoryId: old.categoryId ?? null,
+      unlisted: !!old.unlisted
     };
   }
 
@@ -184,9 +183,32 @@ function migrateIngredient(old) {
     price,
     shelfLifeDays,
     nutriments: sanitizeNutriments(old?.nutriments),
-    lastScannedAt: null,
-    lastPriceAt: null
+
+    // 0.2.0 Zeitstempel
+    lastScannedAt: old?.lastScannedAt ?? null,
+    lastPriceAt: old?.lastPriceAt ?? null,
+
+    // 0.3.0 Kategorien
+    categoryId: old?.categoryId ?? null,
+    unlisted: !!old?.unlisted
   };
+}
+
+function normalizeCategories(arr) {
+  const list = Array.isArray(arr) ? arr : [];
+  const out = [];
+  const seen = new Set();
+  for (const c of list) {
+    if (!c || typeof c !== "object") continue;
+    const id = String(c.id || "").trim();
+    const name = String(c.name || "").trim();
+    if (!id || !name) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name });
+  }
+  out.sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
+  return out;
 }
 
 function ensureStateShape(state) {
@@ -200,6 +222,10 @@ function ensureStateShape(state) {
 
   next.ingredients = Array.isArray(next.ingredients) ? next.ingredients.map(migrateIngredient) : [];
   next.recipes = Array.isArray(next.recipes) ? next.recipes : [];
+
+  // 0.3.0 Kategorien normalisieren
+  next.ingredientCategories = normalizeCategories(next.ingredientCategories);
+  next.recipeCategories = normalizeCategories(next.recipeCategories);
 
   next.plannedRecipes = Array.isArray(next.plannedRecipes) ? next.plannedRecipes : [];
   // ✅ plannedRecipes normalisieren
@@ -241,6 +267,10 @@ function ensureStateShape(state) {
   for (const r of next.recipes) {
     if (!r || typeof r !== "object") continue;
     r.items = Array.isArray(r.items) ? r.items : [];
+
+    // 0.3.0: Kategorienfeld
+    if (!("categoryId" in r)) r.categoryId = null;
+    if (r.categoryId === "") r.categoryId = null;
 
     const raw = Array.isArray(r.cookHistory) ? r.cookHistory : [];
     const fixed = [];
