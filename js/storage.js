@@ -146,7 +146,23 @@ function migrateIngredient(old) {
   // Neues Format schon vorhanden?
   if (old && typeof old === "object" && "amount" in old && "unit" in old && "price" in old) {
     const barcode = (String(old.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
-    return { ...old, barcode: barcode || "", nutriments: sanitizeNutriments(old.nutriments) };
+
+    const sanitizeIso = (v) => {
+      if (!v) return null;
+      const d = new Date(String(v));
+      return Number.isNaN(d.getTime()) ? null : d.toISOString();
+    };
+
+    const lastScannedAt = sanitizeIso(old.lastScannedAt);
+    const lastPriceAt = sanitizeIso(old.lastPriceAt);
+
+    return {
+      ...old,
+      barcode: barcode || "",
+      nutriments: sanitizeNutriments(old.nutriments),
+      lastScannedAt,
+      lastPriceAt
+    };
   }
 
   const id = old?.id ?? (window.crypto?.randomUUID ? crypto.randomUUID() : "id_" + Date.now());
@@ -159,7 +175,18 @@ function migrateIngredient(old) {
 
   const barcode = (String(old?.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
 
-  return { id, name, barcode, amount, unit, price, shelfLifeDays, nutriments: sanitizeNutriments(old?.nutriments) };
+  return {
+    id,
+    name,
+    barcode,
+    amount,
+    unit,
+    price,
+    shelfLifeDays,
+    nutriments: sanitizeNutriments(old?.nutriments),
+    lastScannedAt: null,
+    lastPriceAt: null
+  };
 }
 
 function ensureStateShape(state) {

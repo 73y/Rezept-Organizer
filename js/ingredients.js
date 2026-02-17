@@ -272,10 +272,65 @@
     return `${euro(per * 100)} / 100 ${String(ing.unit || "")}`;
   }
 
+  function isoToMs(iso) {
+    if (!iso) return null;
+    const t = new Date(String(iso)).getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+
+  function lastUpdatedIso(ing) {
+    const s = isoToMs(ing?.lastScannedAt);
+    const p = isoToMs(ing?.lastPriceAt);
+    if (s !== null && p !== null) return s <= p ? String(ing.lastScannedAt) : String(ing.lastPriceAt);
+    if (s !== null) return String(ing.lastScannedAt);
+    if (p !== null) return String(ing.lastPriceAt);
+    return "";
+  }
+
+  function fmtDate(iso) {
+    const ms = isoToMs(iso);
+    if (ms === null) return "—";
+    try {
+      return new Intl.DateTimeFormat("de-DE", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms));
+    } catch {
+      return "—";
+    }
+  }
+
+  function isStale(iso, days = 365) {
+    const ms = isoToMs(iso);
+    if (ms === null) return false;
+    const age = Date.now() - ms;
+    return age > days * 24 * 60 * 60 * 1000;
+  }
+
+  function fillMissingPurchaseTotals(state, ingredientId, price) {
+    const p = Number(price);
+    if (!Array.isArray(state?.purchaseLog)) return 0;
+    if (!Number.isFinite(p) || p <= 0) return 0;
+
+    let changed = 0;
+    for (const e of state.purchaseLog) {
+      if (!e || typeof e !== "object") continue;
+      if (e.ingredientId !== ingredientId) continue;
+      const total = Number(e.total) || 0;
+      if (total > 0) continue; // nur fehlende
+      const packs = Math.max(0, Math.round(Number(e.packs) || 0));
+      if (!packs) continue;
+      e.total = Number((p * packs).toFixed(2));
+      changed++;
+    }
+    return changed;
+  }
+
   function ingredientCardHTML(ing) {
     const packLabel = `${Number(ing.amount) || 0} ${esc(ing.unit || "")}`.trim();
     const price = Number(ing.price) || 0;
     const shelf = Number(ing.shelfLifeDays) || 0;
+
+    const updIso = lastUpdatedIso(ing);
+    const updText = updIso ? fmtDate(updIso) : "—";
+    const stale = updIso ? isStale(updIso, 365) : false;
 
     const open = ui.openIngredientMenus.has(ing.id) ? "open" : "";
 
@@ -292,6 +347,8 @@
               <span>·</span>
               <span>Einheit: ${esc(unitPriceText(ing))}</span>
               ${shelf > 0 ? `<span>· Haltbarkeit: ${esc(shelf)} Tag(e)</span>` : ``}
+              <span>·</span>
+              <span>Zuletzt aktualisiert: <b>${esc(updText)}</b>${stale ? ` <span style="color: rgba(245,158,11,0.95); font-weight:800;">· Rescan empfohlen</span>` : ``}</span>
             </div>
           </div>
 
@@ -648,8 +705,285 @@
       startScan();
     }, 0);
   }
+
+  // Scanner speziell für "Bearbeiten → Scannen & übernehmen"
+  function openBarcodeAdoptModal(state, persist, opts = {}) {
+    const targetIngredientId = String(opts.targetIngredientId || "");
+    const onAdopt = typeof opts.onAdopt === "function" ? opts.onAdopt : null;
+
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+
+    const modal = document.createElement("div");
+    modal.className = "modal scan-modal";
+    modal.style.maxWidth = "720px";
+
+    modal.innerHTML = `
+      <div class="modal-header">
+        <div class="modal-title">Scannen & übernehmen</div>
+        <button class="modal-close" data-action="close" title="Schließen">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="scan-video-wrap">
+          <video id="scan-video" class="scan-video" autoplay playsinline></video>
+          <div class="scan-hint small muted2">Kamera auf den Barcode halten (EAN). Danach kannst du die Daten übernehmen.</div>
+        </div>
+
+        <div class="scan-result" id="scan-result">
+          <span class="small muted2">Noch kein Barcode erkannt.</span>
+        </div>
+
+        <div id="scan-msg" class="small" style="margin-top:10px; color: rgba(239,68,68,0.9);"></div>
+      </div>
+
+      <div class="modal-footer" style="justify-content:space-between;">
+        <button data-action="cancel">Abbrechen</button>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button class="info" data-action="rescan">Neu scannen</button>
+          <button class="success" data-action="apply" disabled>Übernehmen</button>
+        </div>
+      </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const video = modal.querySelector("#scan-video");
+    const msg = modal.querySelector("#scan-msg");
+    const hint = modal.querySelector(".scan-hint");
+    const result = modal.querySelector("#scan-result");
+    const applyBtn = modal.querySelector('button[data-action="apply"]');
+
+    let stream = null;
+    let detector = null;
+    let raf = null;
+    let scanning = false;
+    let lastTick = 0;
+    let scannedCode = "";
+    let offSuggestion = null;
+    let conflictIng = null;
+
+    function setMsg(text, kind = "error") {
+      if (!msg) return;
+      msg.style.color = kind === "ok" ? "rgba(34,197,94,0.95)" : kind === "warn" ? "rgba(245,158,11,0.95)" : "rgba(239,68,68,0.9)";
+      msg.textContent = text || "";
+    }
+
+    function setApplyEnabled(on) {
+      if (applyBtn) applyBtn.disabled = !on;
+    }
+
+    function setResult(code, off = null, conflict = null, loading = false) {
+      if (!result) return;
+      if (!code) {
+        result.innerHTML = `<span class="small muted2">Noch kein Barcode erkannt.</span>`;
+        return;
+      }
+
+      if (conflict) {
+        result.innerHTML = `
+          <div class="small" style="color: rgba(245,158,11,0.95); font-weight:800; margin-bottom:6px;">Barcode schon vergeben</div>
+          <div style="font-size:18px; font-weight:900;">${esc(conflict.name)}</div>
+          <div class="small muted2" style="margin-top:6px;">Barcode: <b>${esc(code)}</b></div>
+          <div class="small muted2" style="margin-top:6px;">Bitte einen anderen Barcode scannen.</div>
+        `;
+        return;
+      }
+
+      const hasOff = !!(off && (off.name || (off.amount && off.unit) || off.nutriments));
+
+      const extra = loading
+        ? `<div class="small muted2" style="margin-top:10px; border-top:1px solid var(--border); padding-top:10px;">Suche Produktdaten…</div>`
+        : hasOff
+          ? `
+            <div class="small" style="margin-top:10px; border-top:1px solid var(--border); padding-top:10px;">
+              <div class="small muted2" style="margin-bottom:6px;">Vorschlag (Open Food Facts)</div>
+              ${off.name ? `<div style="font-weight:900;">${esc(off.name)}</div>` : ``}
+              ${(off.amount && off.unit) ? `<div class="small muted2" style="margin-top:6px;">Packung: <b>${esc(off.amount)} ${esc(off.unit)}</b></div>` : ``}
+              ${off.brands ? `<div class="small muted2" style="margin-top:6px;">Marke: ${esc(off.brands)}</div>` : ``}
+              ${off.nutriments ? (() => {
+                  const n = off.nutriments;
+                  const parts = [];
+                  if (Number.isFinite(n.kcalPer100)) parts.push(`${esc(n.kcalPer100)} kcal/${esc(n.base)}`);
+                  if (Number.isFinite(n.proteinPer100)) parts.push(`Protein ${esc(n.proteinPer100)} g`);
+                  if (Number.isFinite(n.carbsPer100)) parts.push(`KH ${esc(n.carbsPer100)} g`);
+                  if (Number.isFinite(n.fatPer100)) parts.push(`Fett ${esc(n.fatPer100)} g`);
+                  if (!parts.length) return ``;
+                  return `<div class="small muted2" style="margin-top:6px;">Nährwerte: ${parts.join(" · ")}</div>`;
+                })() : ``}
+            </div>
+          `
+          : `<div class="small muted2" style="margin-top:10px; border-top:1px solid var(--border); padding-top:10px;">Kein Vorschlag gefunden (nur Barcode wird übernommen).</div>`;
+
+      result.innerHTML = `
+        <div class="small muted2" style="margin-bottom:6px;">Erkannt</div>
+        <div style="font-size:18px; font-weight:900; letter-spacing:0.5px;">${esc(code)}</div>
+        ${extra}
+      `;
+    }
+
+    async function startCamera() {
+      if (!video) return;
+      if (!navigator.mediaDevices?.getUserMedia) {
+        if (hint) hint.textContent = "Kamera wird vom Browser nicht unterstützt.";
+        setMsg("Kamera wird vom Browser nicht unterstützt.", "warn");
+        return;
+      }
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+
+        video.srcObject = stream;
+        await video.play();
+      } catch {
+        if (hint) hint.textContent = "Kamera-Zugriff blockiert. Erlaube Kamera in den Website-Einstellungen.";
+        setMsg("Kamera-Zugriff nicht möglich.", "warn");
+      }
+    }
+
+    function stopCamera() {
+      scanning = false;
+      if (raf) cancelAnimationFrame(raf);
+      raf = null;
+
+      try {
+        if (stream) for (const t of stream.getTracks()) t.stop();
+      } catch {}
+
+      stream = null;
+      detector = null;
+    }
+
+    async function ensureDetector() {
+      if (detector) return detector;
+      if (typeof BarcodeDetector === "undefined") return null;
+      try {
+        detector = new BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128"] });
+        return detector;
+      } catch {
+        return null;
+      }
+    }
+
+    async function tick(ts) {
+      if (!scanning) return;
+      raf = requestAnimationFrame(tick);
+      if (ts - lastTick < 160) return;
+      lastTick = ts;
+
+      const det = await ensureDetector();
+      if (!det || !video) {
+        scanning = false;
+        if (hint) hint.textContent = "Scanner wird auf diesem Gerät nicht unterstützt.";
+        setMsg("Scanner nicht unterstützt.", "warn");
+        return;
+      }
+
+      if (video.readyState < 2) return;
+
+      try {
+        const res = await det.detect(video);
+        if (Array.isArray(res) && res.length) {
+          const raw = res[0]?.rawValue || "";
+          const code = cleanBarcode(raw);
+          if (!code) return;
+
+          scannedCode = code;
+          offSuggestion = null;
+          conflictIng = null;
+
+          const existing = (state.ingredients || []).find((x) => cleanBarcode(x?.barcode) === code) || null;
+          if (existing && existing.id !== targetIngredientId) {
+            conflictIng = existing;
+            setResult(code, null, conflictIng, false);
+            setMsg(`Dieser Barcode gehört schon zu „${existing.name}“.`, "warn");
+            setApplyEnabled(false);
+            scanning = false;
+            return;
+          }
+
+          setResult(code, null, null, true);
+          setMsg("Suche Produktdaten…", "warn");
+          setApplyEnabled(false);
+          scanning = false;
+
+          offSuggestion = await fetchOffSuggestion(state, persist, code);
+          setResult(code, offSuggestion, null, false);
+          setMsg(offSuggestion?.name ? ("Vorschlag gefunden: " + offSuggestion.name) : "Bereit zum Übernehmen", "ok");
+          setApplyEnabled(true);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    function startScan() {
+      setMsg("");
+      scanning = true;
+      lastTick = 0;
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(tick);
+    }
+
+    function close() {
+      stopCamera();
+      overlay.remove();
+    }
+
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+
+    modal.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const a = btn.getAttribute("data-action");
+
+      if (a === "close" || a === "cancel") return close();
+
+      if (a === "rescan") {
+        scannedCode = "";
+        offSuggestion = null;
+        conflictIng = null;
+        setResult("", null);
+        setMsg("");
+        setApplyEnabled(false);
+        startScan();
+        return;
+      }
+
+      if (a === "apply") {
+        if (!scannedCode) return;
+        if (conflictIng) return;
+        const payload = { barcode: scannedCode, suggestion: offSuggestion || null, scannedAt: new Date().toISOString() };
+        close();
+        onAdopt?.(payload);
+      }
+    });
+
+    // Start
+    setTimeout(async () => {
+      setResult("", null);
+      setApplyEnabled(false);
+      await startCamera();
+      startScan();
+    }, 0);
+  }
+
   function openIngredientModal(state, persist, ingOrNull, opts = {}) {
     const isEdit = !!ingOrNull;
+
+    const updIso = isEdit ? lastUpdatedIso(ingOrNull) : "";
+    const updText = updIso ? fmtDate(updIso) : "—";
+    const updStale = updIso ? isStale(updIso, 365) : false;
 
     const unitRaw = String(ingOrNull?.unit || "").trim();
     const preUnitRaw = !isEdit ? String(opts?.prefillUnit ?? "").trim() : "";
@@ -684,6 +1018,8 @@
         </div>
       </div>
 
+      ${isEdit ? `<div class="small muted2" style="margin-top:8px;">Zuletzt aktualisiert: <b>${esc(updText)}</b>${updStale ? ` <span style=\"color: rgba(245,158,11,0.95); font-weight:800;\">· Rescan empfohlen</span>` : ``}</div>` : ``}
+
       ${(!isEdit && (opts?.prefillName || opts?.prefillAmount)) ? `<div class="small muted2" style="margin-top:8px;">Vorschlag aus Barcode-Daten übernommen. Preis/Haltbarkeit ggf. ergänzen.</div>` : ``}
 
       <div class="row" style="margin-top:10px;">
@@ -702,6 +1038,7 @@
           <input id="i-barcode" type="hidden" value="${esc(preBarcode)}" />
           <div class="small muted2" style="margin-top:6px;">Automatisch beim Scannen. Manuelle Eingabe ist aus.</div>
           ${preBarcode ? `<button type="button" class="danger" data-action="clearBarcode" style="margin-top:8px;">Barcode entfernen</button>` : ``}
+          ${isEdit ? `<button type="button" class="info" data-action="scanAdopt" style="margin-top:8px;">Scannen &amp; übernehmen</button>` : ``}
         </div>
       </div>
 
@@ -796,19 +1133,41 @@
           const it = state.ingredients.find((x) => x.id === ingOrNull.id);
           if (!it) return (msg.textContent = "Zutat nicht gefunden.");
 
+          const nowIso = new Date().toISOString();
+          const prevPriceCents = Math.round((Number(it.price) || 0) * 100);
+          const nextPrice = Number((price || 0).toFixed(2));
+          const nextPriceCents = Math.round(nextPrice * 100);
+          const priceChanged = prevPriceCents !== nextPriceCents;
+
+          // Scan-Zeitstempel nur übernehmen, wenn in diesem Modal wirklich "Übernehmen" gedrückt wurde
+          const scanAppliedAt = m.__scanAppliedAt ? String(m.__scanAppliedAt) : "";
+
           it.name = name;
           it.barcode = barcode || "";
           it.amount = amount;
           it.unit = unit;
-          it.price = Number((price || 0).toFixed(2));
+          it.price = nextPrice;
           it.shelfLifeDays = shelf;
           it.nutriments = nutriments || null;
+
+          if (scanAppliedAt) it.lastScannedAt = scanAppliedAt;
+          if (priceChanged) it.lastPriceAt = nowIso;
+
+          // Auto-Nachziehen (nur fehlende purchaseLog totals)
+          if (priceChanged) {
+            const filled = fillMissingPurchaseTotals(state, it.id, it.price);
+            if (filled > 0) setFlash(`Preis gesetzt → ${filled} Kauf(e) nachberechnet.`);
+          }
 
           persist();
           close();
           window.app.navigate("ingredients");
           return;
         }
+
+        const nowIso = new Date().toISOString();
+        const lastScannedAt = barcode ? nowIso : null;
+        const lastPriceAt = Number.isFinite(price) && price > 0 ? nowIso : null;
 
         state.ingredients.push({
           id: uid(),
@@ -818,7 +1177,9 @@
           unit,
           price: Number((price || 0).toFixed(2)),
           shelfLifeDays: shelf,
-          nutriments: nutriments || null
+          nutriments: nutriments || null,
+          lastScannedAt,
+          lastPriceAt
         });
 
         persist();
@@ -836,6 +1197,79 @@
       if (hidden) hidden.value = "";
       if (view) view.textContent = "—";
       b.remove();
+    });
+
+    // Bearbeiten → Scannen & übernehmen
+    modal.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-action=scanAdopt]");
+      if (!b) return;
+      if (!isEdit || !ingOrNull?.id) return;
+
+      openBarcodeAdoptModal(state, persist, {
+        targetIngredientId: ingOrNull.id,
+        onAdopt: ({ barcode, suggestion, scannedAt }) => {
+          const code = cleanBarcode(barcode);
+          if (!code) return;
+
+          // Barcode übernehmen
+          const hidden = modal.querySelector("#i-barcode");
+          const view = modal.querySelector("#i-barcode-view");
+          if (hidden) hidden.value = code;
+          if (view) view.textContent = code;
+
+          // Falls noch kein "Barcode entfernen"-Button da ist, nachziehen
+          const box = view?.parentElement;
+          if (box && !box.querySelector("button[data-action=clearBarcode]")) {
+            box.insertAdjacentHTML(
+              "beforeend",
+              `<button type="button" class="danger" data-action="clearBarcode" style="margin-top:8px;">Barcode entfernen</button>`
+            );
+          }
+
+          // Vorschlag übernehmen (nur wenn vorhanden)
+          if (suggestion && typeof suggestion === "object") {
+            if (suggestion.name) {
+              const nameEl = modal.querySelector("#i-name");
+              if (nameEl) nameEl.value = String(suggestion.name);
+            }
+
+            if (suggestion.amount && suggestion.unit) {
+              const amtEl = modal.querySelector("#i-amount");
+              if (amtEl) amtEl.value = String(suggestion.amount);
+
+              const unitEl = modal.querySelector("#i-unit");
+              const u = normalizeUnit(String(suggestion.unit));
+              if (unitEl && u) {
+                const has = Array.from(unitEl.options || []).some((o) => o.value === u);
+                if (!has) unitEl.insertAdjacentHTML("beforeend", `<option value="${esc(u)}">Andere: ${esc(u)}</option>`);
+                unitEl.value = u;
+              }
+            }
+
+            if (suggestion.nutriments && typeof suggestion.nutriments === "object") {
+              const n = suggestion.nutriments;
+              const set = (sel, val) => {
+                const el = modal.querySelector(sel);
+                if (!el) return;
+                el.value = Number.isFinite(Number(val)) ? String(val) : "";
+              };
+              set("#i-kcal", n.kcalPer100);
+              set("#i-protein", n.proteinPer100);
+              set("#i-carbs", n.carbsPer100);
+              set("#i-fat", n.fatPer100);
+            }
+          }
+
+          // Merken: Scan wurde übernommen → beim Speichern lastScannedAt setzen
+          modal.__scanAppliedAt = scannedAt || new Date().toISOString();
+
+          const msg = modal.querySelector("#i-msg");
+          if (msg) {
+            msg.style.color = "rgba(34,197,94,0.95)";
+            msg.textContent = "Scan-Daten übernommen. Jetzt Preis/Haltbarkeit prüfen und speichern.";
+          }
+        }
+      });
     });
 
     // Fokus

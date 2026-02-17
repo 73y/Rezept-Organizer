@@ -1,6 +1,7 @@
 :root{
   --bg: #0f0f10;
   --panel: #17171a;
+  --card: var(--panel);
   --text: #e9e9ee;
   --muted: #b7b7c2;
   --border: #2a2a32;
@@ -14,6 +15,7 @@
 html[data-theme="light"]{
   --bg: #f6f7fb;
   --panel: #ffffff;
+  --card: var(--panel);
   --text: #111827;
   --muted: #4b5563;
   --border: #e5e7eb;
