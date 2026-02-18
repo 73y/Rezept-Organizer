@@ -129,11 +129,26 @@
   }
 
   async function ensurePdfJs() {
-    if (window.pdfjsLib) return window.pdfjsLib;
+    // pdf.js (UMD build) – needs to attach window.pdfjsLib
+    if (window.pdfjsLib && window.pdfjsLib.getDocument) return window.pdfjsLib;
 
-    // Lazy-load (online once). Fallback: Text einfügen.
-    const src = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js";
-    await new Promise((resolve, reject) => {
+    // Use a stable UMD build (v2). Newer v4 builds are often ESM-only and won't attach globals.
+    const SOURCES = [
+      {
+        lib: "https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/build/pdf.min.js",
+        worker: "https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/build/pdf.worker.min.js"
+      },
+      {
+        lib: "https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.min.js",
+        worker: "https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.worker.min.js"
+      },
+      {
+        lib: "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js",
+        worker: "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js"
+      }
+    ];
+
+    const loadScript = (src) => new Promise((resolve, reject) => {
       const s = document.createElement("script");
       s.src = src;
       s.async = true;
@@ -142,24 +157,54 @@
       document.head.appendChild(s);
     });
 
-    return window.pdfjsLib;
+    let lastErr = null;
+
+    for (const src of SOURCES) {
+      try {
+        await loadScript(src.lib);
+        const lib = window.pdfjsLib;
+        if (lib && lib.getDocument) {
+          if (lib.GlobalWorkerOptions) lib.GlobalWorkerOptions.workerSrc = src.worker;
+          return lib;
+        }
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+
+    throw lastErr || new Error("PDF-Lib konnte nicht geladen werden.");
   }
 
   async function extractTextFromPdfFile(file) {
     const pdfjsLib = await ensurePdfJs();
-    if (!pdfjsLib) throw new Error("PDF-Lib fehlt.");
-
-    if (pdfjsLib.GlobalWorkerOptions && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.js";
-    }
+    if (!pdfjsLib || !pdfjsLib.getDocument) throw new Error("PDF-Lib fehlt.");
 
     const buf = await file.arrayBuffer();
-    const doc = await pdfjsLib.getDocument({ data: buf }).promise;
+
+    // Some environments (esp. PWA) may block the worker URL -> pdf.js throws "fake worker" error.
+    // Fallback: disable worker and try again.
+    let doc;
+    try {
+      doc = await pdfjsLib.getDocument({ data: buf }).promise;
+    } catch (e) {
+      const msg = String(e?.message || e || "");
+      if (!pdfjsLib.disableWorker) {
+        try {
+          pdfjsLib.disableWorker = true;
+          doc = await pdfjsLib.getDocument({ data: buf }).promise;
+        } catch (e2) {
+          throw new Error(msg || String(e2?.message || e2 || "PDF konnte nicht geladen werden."));
+        }
+      } else {
+        throw new Error(msg || "PDF konnte nicht geladen werden.");
+      }
+    }
 
     const linesOut = [];
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
       const content = await page.getTextContent();
+
       const items = (content.items || [])
         .map((it) => ({
           str: String(it.str || "").trim(),
@@ -168,6 +213,7 @@
         }))
         .filter((it) => it.str);
 
+      // Sort: top->bottom, left->right
       items.sort((a, b) => b.y - a.y || a.x - b.x);
 
       let curY = null;
@@ -184,7 +230,8 @@
           cur.push(it.str);
           continue;
         }
-        if (Math.abs(it.y - curY) > 2.5) {
+        // y tolerance (pdf coords are floaty)
+        if (Math.abs(it.y - curY) > 3.0) {
           flush();
           curY = it.y;
         }
@@ -194,9 +241,59 @@
       linesOut.push(""); // page break
     }
 
-    return linesOut.join("\n");
+    const out = linesOut.join("\n").trim();
+    if (!out) throw new Error("PDF enthält keinen lesbaren Text.");
+    return out;
   }
 
+
+
+  // Auto-read selected receipt file and prefill textarea (so user doesn't need to press "Vorschau" just to read)
+  async function prefillReceiptTextFromFile(modalEl, file) {
+    if (!modalEl || !file) return;
+    const ta = modalEl.querySelector("#receipt-text");
+    const nameEl = modalEl.querySelector("#receipt-picked-name");
+    if (!ta) return;
+
+    // Don't overwrite user edits
+    if (String(ta.value || "").trim()) return;
+
+    const isPdf = (file.type === "application/pdf") || file.name.toLowerCase().endsWith(".pdf");
+    const isText = (file.type === "text/plain") || file.name.toLowerCase().endsWith(".txt");
+
+    // Token to ignore stale async results
+    modalEl.__receiptAutoToken = (modalEl.__receiptAutoToken || 0) + 1;
+    const token = modalEl.__receiptAutoToken;
+
+    const setLabel = (suffix) => {
+      if (!nameEl) return;
+      const base = file?.name ? file.name : "Datei";
+      nameEl.textContent = suffix ? `${base} ${suffix}` : base;
+    };
+
+    setLabel("(wird gelesen…)");
+
+    const p = (async () => {
+      if (isPdf) return await extractTextFromPdfFile(file);
+      if (isText) return await file.text();
+      return await file.text();
+    })();
+
+    modalEl.__receiptTextPromise = p;
+
+    try {
+      const text = await p;
+      if (modalEl.__receiptAutoToken !== token) return;
+      if (!String(ta.value || "").trim()) ta.value = text;
+      setLabel("✓");
+      window.ui?.toast?.("Bon-Datei geladen ✓", { timeoutMs: 1500 });
+    } catch (e) {
+      if (modalEl.__receiptAutoToken !== token) return;
+      setLabel("(nicht lesbar)");
+      console.warn(e);
+      window.ui?.toast?.("PDF konnte nicht gelesen werden – bitte Text einfügen.", { timeoutMs: 3500 });
+    }
+  }
   function receiptProgress(receipt) {
     const items = Array.isArray(receipt?.items) ? receipt.items : [];
     const main = items.filter((x) => x.kind === "item");
@@ -351,7 +448,8 @@
             if (body) body.innerHTML = renderBody();
           }
         });
-      
+        return;
+      }
       if (a === "freeScan") {
         openReceiptFreeScanModal(state, persist, receiptId, {
           onFinish: () => {
@@ -359,8 +457,8 @@
             if (body) body.innerHTML = renderBody();
           }
         });
+        return;
       }
-}
     });
 
 modal.modal.addEventListener("change", (ev) => {
@@ -1570,7 +1668,17 @@ function openReceiptsHub(state, persist) {
       cancelText: "Abbrechen",
       onConfirm: async (m, close) => {
         const file = (m.__receiptFile || m.querySelector("#receipt-file")?.files?.[0] || null);
-        const pasted = (m.querySelector("#receipt-text")?.value || "").trim();
+        const ta = m.querySelector("#receipt-text");
+        let pasted = (ta?.value || "").trim();
+
+        // If a PDF was selected, we try to auto-read it right away (prefillReceiptTextFromFile sets __receiptTextPromise).
+        // When user taps "Vorschau" while the PDF is still being read, we wait for it here.
+        if (!pasted && m.__receiptTextPromise) {
+          try {
+            await m.__receiptTextPromise;
+            pasted = (ta?.value || "").trim();
+          } catch {}
+        }
 
         if (!file && !pasted) {
           window.ui?.toast?.("Bitte PDF wählen oder Text einfügen.");
@@ -1681,6 +1789,8 @@ function openReceiptsHub(state, persist) {
                 const f = await handle.getFile();
                 try { root.__receiptFile = f; } catch {}
                 if (nameEl) nameEl.textContent = f ? f.name : "Keine Datei gewählt";
+                // Auto-read into textarea
+                try { prefillReceiptTextFromFile(root, f); } catch {}
                 // clear the fallback input so we don't read stale files
                 try { fileInput.value = ""; } catch {}
                 return;
@@ -1701,6 +1811,7 @@ function openReceiptsHub(state, persist) {
           const f = fileInput.files?.[0] || null;
           try { root.__receiptFile = f; } catch {}
           if (nameEl) nameEl.textContent = f ? f.name : "Keine Datei gewählt";
+          try { prefillReceiptTextFromFile(root, f); } catch {}
         });
       }
     } catch (e) {
