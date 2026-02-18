@@ -1553,7 +1553,7 @@ function openReceiptsHub(state, persist) {
             WICHTIG (Android): nicht display:none, sonst kann der Picker "nichts" tun.
             Außerdem kein capture-Attribut, sonst bietet Samsung oft nur Kamera/Galerie.
           -->
-          <input id="receipt-file" type="file" accept=".pdf,application/pdf,text/plain,.txt"
+          <input id="receipt-file" type="file" accept=".pdf,application/pdf"
             style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;" />
         </div>
         <textarea id="receipt-text" class="input" style="min-height:140px; white-space:pre;" placeholder="Bon-Text hier einfügen…"></textarea>
@@ -1661,8 +1661,38 @@ function openReceiptsHub(state, persist) {
       const nameEl = root.querySelector("#receipt-picked-name");
 
       if (pickBtn && fileInput) {
-        pickBtn.addEventListener("click", () => {
-          // allow selecting same file again
+        pickBtn.addEventListener("click", async () => {
+          // NOTE (Android/Samsung): <input type=file> can sometimes only show Kamera/Galerie.
+          // If supported, prefer the File System Access API, which opens a real file picker.
+          if (window.showOpenFilePicker) {
+            try {
+              const handles = await window.showOpenFilePicker({
+                multiple: false,
+                excludeAcceptAllOption: false,
+                types: [
+                  {
+                    description: "PDF",
+                    accept: { "application/pdf": [".pdf"] }
+                  }
+                ]
+              });
+              const handle = handles && handles[0];
+              if (handle) {
+                const f = await handle.getFile();
+                try { root.__receiptFile = f; } catch {}
+                if (nameEl) nameEl.textContent = f ? f.name : "Keine Datei gewählt";
+                // clear the fallback input so we don't read stale files
+                try { fileInput.value = ""; } catch {}
+                return;
+              }
+            } catch (e) {
+              // user cancelled -> do nothing
+              if (e && e.name === "AbortError") return;
+              console.warn("showOpenFilePicker failed, falling back", e);
+            }
+          }
+
+          // Fallback: input.click()
           try { fileInput.value = ""; } catch {}
           fileInput.click();
         });
