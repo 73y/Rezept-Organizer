@@ -13,6 +13,1571 @@
 
   const cleanBarcode = (raw) => String(raw ?? "").replace(/\D+/g, "").trim();
 
+
+  // ---- Bon / Beleg (0.4.0) ----
+  const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|ec\b|bar\b|r\.?\s*zahlung|rundung)/i;
+  const RECEIPT_PRICE_RE = /-?\d{1,3}(?:\.\d{3})*,\d{2}/g;
+
+  function parseEuroStr(s) {
+    const v = String(s || "").replace(/\./g, "").replace(",", ".").replace(/[^0-9\-\.]/g, "");
+    const n = Number(v);
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString("de-DE", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function guessReceiptMeta(text) {
+    const t = String(text || "");
+    const store = /\brewe\b/i.test(t) ? "REWE" : "Bon";
+
+    let at = null;
+    const dmY = t.match(/(\d{2})\.(\d{2})\.(\d{4})/);
+    const hm = t.match(/(\d{2}):(\d{2})/);
+    if (dmY) {
+      const dd = Number(dmY[1]), mm = Number(dmY[2]), yy = Number(dmY[3]);
+      const hh = hm ? Number(hm[1]) : 12;
+      const mi = hm ? Number(hm[2]) : 0;
+      const d = new Date(yy, mm - 1, dd, hh, mi, 0, 0);
+      if (!Number.isNaN(d.getTime())) at = d.toISOString();
+    }
+    if (!at) at = new Date().toISOString();
+
+    return { store, at };
+  }
+
+  function parseReceiptItemsFromText(text) {
+    const lines = String(text || "")
+      .replace(/\r/g, "\n")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    const items = [];
+    let started = false;
+
+    for (const lineRaw of lines) {
+      const line = String(lineRaw || "").trim();
+      if (!line) continue;
+
+      if (started && RECEIPT_STOP_RE.test(line)) break;
+
+      const matches = line.match(RECEIPT_PRICE_RE);
+      if (!matches || matches.length === 0) continue;
+
+      const lastStr = matches[matches.length - 1];
+      const lastIdx = line.lastIndexOf(lastStr);
+      if (lastIdx < 0) continue;
+
+      // Heuristic: ignore lines that look like headers or phone numbers, etc.
+      if (/^tel\b|^kasse\b|^filiale\b/i.test(line)) continue;
+
+      started = true;
+
+      const lineTotal = parseEuroStr(lastStr);
+      if (!Number.isFinite(lineTotal)) continue;
+
+      const secondLastStr = matches.length >= 2 ? matches[matches.length - 2] : null;
+      const unitPriceMaybe = secondLastStr ? parseEuroStr(secondLastStr) : NaN;
+
+      let namePart = line.slice(0, lastIdx).trim();
+      if (secondLastStr) {
+        const idx2 = namePart.lastIndexOf(secondLastStr);
+        if (idx2 >= 0 && idx2 + secondLastStr.length >= namePart.length - 1) {
+          namePart = namePart.slice(0, idx2).trim();
+        }
+      }
+
+      let qty = 1;
+      const mQty = namePart.match(/^(\d+)\s*[xX]\s+(.+)$/);
+      if (mQty) {
+        qty = Math.max(1, Math.round(Number(mQty[1]) || 1));
+        namePart = String(mQty[2] || "").trim();
+      } else if (Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0) {
+        const ratio = lineTotal / unitPriceMaybe;
+        const r = Math.round(ratio);
+        if (Number.isFinite(ratio) && r > 0 && Math.abs(ratio - r) < 0.05) qty = r;
+      }
+
+      const unitPrice = Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0 ? unitPriceMaybe : (lineTotal / qty);
+
+      const rawName = namePart.replace(/\s{2,}/g, " ").trim();
+
+      // classify
+      const low = rawName.toLowerCase();
+      let kind = "item";
+      if (/pfand/.test(low)) kind = "pfand";
+      else if (/rabatt|coupon|gutschein|payback|aktion|bonus/.test(low)) kind = "discount";
+      else if (/mwst|ust/.test(low)) kind = "misc";
+
+      items.push({
+        id: uid(),
+        rawName: rawName || "(unbekannt)",
+        qty: Math.max(1, qty),
+        unitPrice: Math.round((Number(unitPrice) || 0) * 100) / 100,
+        lineTotal: Math.round((Number(lineTotal) || 0) * 100) / 100,
+        matchedIngredientId: null,
+        kind
+      });
+    }
+
+    return items;
+  }
+
+  async function ensurePdfJs() {
+    if (window.pdfjsLib) return window.pdfjsLib;
+
+    // Lazy-load (online once). Fallback: Text einfügen.
+    const src = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.js";
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.async = true;
+      s.onload = () => resolve(true);
+      s.onerror = () => reject(new Error("PDF-Lib konnte nicht geladen werden."));
+      document.head.appendChild(s);
+    });
+
+    return window.pdfjsLib;
+  }
+
+  async function extractTextFromPdfFile(file) {
+    const pdfjsLib = await ensurePdfJs();
+    if (!pdfjsLib) throw new Error("PDF-Lib fehlt.");
+
+    if (pdfjsLib.GlobalWorkerOptions && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.js";
+    }
+
+    const buf = await file.arrayBuffer();
+    const doc = await pdfjsLib.getDocument({ data: buf }).promise;
+
+    const linesOut = [];
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const content = await page.getTextContent();
+      const items = (content.items || [])
+        .map((it) => ({
+          str: String(it.str || "").trim(),
+          x: it.transform ? Number(it.transform[4]) || 0 : 0,
+          y: it.transform ? Number(it.transform[5]) || 0 : 0
+        }))
+        .filter((it) => it.str);
+
+      items.sort((a, b) => b.y - a.y || a.x - b.x);
+
+      let curY = null;
+      let cur = [];
+      const flush = () => {
+        if (!cur.length) return;
+        linesOut.push(cur.join(" ").replace(/\s{2,}/g, " ").trim());
+        cur = [];
+      };
+
+      for (const it of items) {
+        if (curY === null) {
+          curY = it.y;
+          cur.push(it.str);
+          continue;
+        }
+        if (Math.abs(it.y - curY) > 2.5) {
+          flush();
+          curY = it.y;
+        }
+        cur.push(it.str);
+      }
+      flush();
+      linesOut.push(""); // page break
+    }
+
+    return linesOut.join("\n");
+  }
+
+  function receiptProgress(receipt) {
+    const items = Array.isArray(receipt?.items) ? receipt.items : [];
+    const main = items.filter((x) => x.kind === "item");
+    const total = main.length;
+    const matched = main.filter((x) => x.matchedIngredientId).length;
+    return { matched, total };
+  }
+
+  function findPurchaseLogEntryForReceiptItem(state, receiptId, receiptItemId) {
+    return (state.purchaseLog || []).find((e) => e && e.source === "receipt" && e.receiptId === receiptId && e.receiptItemId === receiptItemId) || null;
+  }
+
+  function upsertPurchaseLogFromReceiptItem(state, receipt, item) {
+    const at = receipt.at;
+    const entry = findPurchaseLogEntryForReceiptItem(state, receipt.id, item.id);
+    const qty = Math.max(1, Math.round(Number(item.qty) || 1));
+    const total = Number(item.lineTotal) || 0;
+    const unitPrice = Number(item.unitPrice) || (total / qty);
+
+    if (!entry) {
+      state.purchaseLog.push({
+        id: uid(),
+        at,
+        total,
+        ingredientId: item.matchedIngredientId || null,
+        packs: qty,
+        buyAmount: 0,
+        unit: "",
+        source: "receipt",
+        receiptId: receipt.id,
+        receiptItemId: item.id,
+        rawName: item.rawName,
+        qty,
+        unitPrice,
+        kind: item.kind
+      });
+      return;
+    }
+
+    entry.at = at;
+    entry.total = total;
+    entry.rawName = item.rawName;
+    entry.qty = qty;
+    entry.packs = qty;
+    entry.unitPrice = unitPrice;
+    entry.kind = item.kind;
+
+    entry.ingredientId = item.matchedIngredientId || null;
+
+    if (entry.ingredientId) {
+      const ing = (state.ingredients || []).find((x) => x.id === entry.ingredientId) || null;
+      if (ing) {
+        entry.unit = ing.unit || "";
+        const packAmt = Number(ing.amount) || 0;
+        entry.buyAmount = packAmt > 0 ? packAmt * qty : 0;
+
+        // Preis nur setzen, wenn bisher leer/0 (vorsichtig)
+        const curPrice = Number(ing.price);
+        if (!Number.isFinite(curPrice) || curPrice <= 0) {
+          ing.price = Math.round(unitPrice * 100) / 100;
+        }
+      }
+    } else {
+      entry.unit = "";
+      entry.buyAmount = 0;
+    }
+  }
+
+  function openReceiptDetailModal(state, persist, receiptId) {
+    const receipt = (state.receipts || []).find((r) => r && r.id === receiptId);
+    if (!receipt) return window.ui?.toast?.("Bon nicht gefunden.");
+
+    const renderBody = () => {
+      const r = (state.receipts || []).find((x) => x && x.id === receiptId);
+      if (!r) return `<div class="small">Bon nicht gefunden.</div>`;
+
+      const { matched, total } = receiptProgress(r);
+
+      const ing = (state.ingredients || []).slice().sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+
+      const rows = (r.items || []).map((it) => {
+        const isMain = it.kind === "item";
+        const mapped = it.matchedIngredientId ? ing.find((x) => x.id === it.matchedIngredientId) : null;
+
+        const select = isMain
+          ? `
+            <select data-action="map" data-item-id="${esc(it.id)}" style="width:100%;">
+              <option value="">— Zutat wählen —</option>
+              ${ing
+                .map((x) => `<option value="${esc(x.id)}" ${it.matchedIngredientId === x.id ? "selected" : ""}>${esc(x.name || "Unbenannt")}</option>`)
+                .join("")}
+              <option value="__new__">+ Neue Zutat…</option>
+            </select>
+          `
+          : `<div class="small muted2">Bon-Posten</div>`;
+
+        return `
+          <div style="border:1px solid var(--border); border-radius:12px; padding:10px; margin:8px 0;">
+            <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+              <div style="min-width:0;">
+                <div style="font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(it.rawName || "(unbekannt)")}</div>
+                <div class="small muted2" style="margin-top:2px;">
+                  ${esc(Math.max(1, Number(it.qty) || 1))}× · ${esc(euro(Number(it.lineTotal) || 0))}
+                  ${it.kind === "pfand" ? " · Pfand" : it.kind === "discount" ? " · Rabatt" : ""}
+                </div>
+                ${mapped ? `<div class="small" style="margin-top:6px;">→ <b>${esc(mapped.name || "")}</b></div>` : ``}
+              </div>
+              <div style="text-align:right; min-width:120px;">
+                ${select}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      return `
+        <div class="small muted2">Status: <b>${matched}/${total}</b> zugeordnet</div>
+        <div class="small muted2" style="margin-top:2px;">${esc(r.store || "Bon")} · ${esc(fmtDate(r.at))} · Gesamt (berechnet): <b>${esc(euro(r.total || 0))}</b></div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
+          <button class=\"success\" data-action=\"guidedScan\" data-receipt-id=\"${esc(r.id)}\">Geführtes Scannen</button>
+          <button class=\"info\" data-action=\"freeScan\" data-receipt-id=\"${esc(r.id)}\">Freies Scannen</button>
+        </div>
+        <div style="margin-top:10px;">${rows || `<div class="small">Keine Positionen erkannt.</div>`}</div>
+      `;
+    };
+
+    const modal = window.ui?.modal?.({
+      title: "Bon – Zuordnen",
+      contentHTML: renderBody(),
+      okText: "Schließen",
+      cancelText: " ",
+      onConfirm: (_m, close) => close()
+    });
+
+    if (!modal) return;
+
+    // hide cancel button visually if empty
+    try {
+      const cancelBtn = modal.modal.querySelector('button[data-action="cancel"]');
+      if (cancelBtn) cancelBtn.style.display = "none";
+    } catch {}
+
+    
+    modal.modal.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button[data-action]");
+      if (!btn) return;
+      const a = btn.getAttribute("data-action");
+      if (a === "guidedScan") {
+        openReceiptGuidedScanModal(state, persist, receiptId, {
+          onFinish: () => {
+            const body = modal.modal.querySelector(".modal-body");
+            if (body) body.innerHTML = renderBody();
+          }
+        });
+      
+      if (a === "freeScan") {
+        openReceiptFreeScanModal(state, persist, receiptId, {
+          onFinish: () => {
+            const body = modal.modal.querySelector(".modal-body");
+            if (body) body.innerHTML = renderBody();
+          }
+        });
+      }
+}
+    });
+
+modal.modal.addEventListener("change", (ev) => {
+      const sel = ev.target.closest("select[data-action='map']");
+      if (!sel) return;
+      const itemId = sel.getAttribute("data-item-id");
+      const v = sel.value;
+
+      const r = (state.receipts || []).find((x) => x && x.id === receiptId);
+      if (!r) return;
+
+      const it = (r.items || []).find((x) => x && x.id === itemId);
+      if (!it) return;
+
+      const doSet = (ingredientIdOrNull) => {
+        it.matchedIngredientId = ingredientIdOrNull || null;
+        r.updatedAt = new Date().toISOString();
+
+        // keep purchaseLog in sync
+        upsertPurchaseLogFromReceiptItem(state, r, it);
+
+        persist();
+        // re-render body
+        const body = modal.modal.querySelector(".modal-body");
+        if (body) body.innerHTML = renderBody();
+      };
+
+      if (v === "__new__") {
+        const suggested = it.rawName || "";
+        window.ui?.modal?.({
+          title: "Neue Zutat",
+          contentHTML: `
+            <div class="small muted2" style="margin-bottom:8px;">Name:</div>
+            <input id="new-ing-name" class="input" value="${esc(suggested)}" placeholder="z.B. Paprika" />
+            <div class="small muted2" style="margin-top:10px;">Packgröße/Preis kannst du später im Zutaten-Tab setzen.</div>
+          `,
+          okText: "Anlegen",
+          cancelText: "Abbrechen",
+          onConfirm: (m2, close2) => {
+            const name = (m2.querySelector("#new-ing-name")?.value || "").trim();
+            if (!name) {
+              window.ui?.toast?.("Bitte Name eingeben.");
+              return;
+            }
+            const newIng = { id: uid(), name, barcode: "", amount: 1, unit: "Stück", price: 0, shelfLifeDays: 0 };
+            state.ingredients.push(newIng);
+            persist();
+            close2();
+            doSet(newIng.id);
+          }
+        });
+        return;
+      }
+
+      doSet(v || null);
+    });
+  }
+
+  
+  // --- 0.4.1: Geführtes Scannen für Bons (Barcode -> Zutat -> Bearbeiten -> weiter scannen) ---
+  function tokenizeForMatch(text) {
+    return String(text || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9äöüß]+/gi, " ")
+      .split(" ")
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 2);
+  }
+
+  function nameSimilarity(a, b) {
+    const A = new Set(tokenizeForMatch(a));
+    const B = new Set(tokenizeForMatch(b));
+    if (!A.size || !B.size) return 0;
+    let inter = 0;
+    for (const x of A) if (B.has(x)) inter++;
+    const uni = A.size + B.size - inter;
+    return uni > 0 ? inter / uni : 0;
+  }
+
+  function suggestIngredientsByName(state, expectedName, limit = 3) {
+    const list = Array.isArray(state.ingredients) ? state.ingredients : [];
+    const scored = list
+      .map((ing) => ({ ing, score: nameSimilarity(expectedName, ing?.name || "") }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+    return scored;
+  }
+
+  function ensureBarcodeCache(state) {
+    if (!state.barcodeLookupCache || typeof state.barcodeLookupCache !== "object") state.barcodeLookupCache = {};
+    return state.barcodeLookupCache;
+  }
+
+  function parseOffQuantity(qtyRaw) {
+    const s = String(qtyRaw || "").trim();
+    if (!s) return null;
+
+    // 6 x 330 ml / 6x330ml / 2 x 500 g
+    let m = s.match(/(\d+)\s*[xX]\s*(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg)\b/i);
+    if (m) {
+      const count = Math.max(1, parseInt(m[1], 10));
+      const each = parseFloat(String(m[2]).replace(",", "."));
+      let unit = String(m[3]).toLowerCase();
+      let amount = each * count;
+      if (!Number.isFinite(amount) || amount <= 0) return null;
+      if (unit === "kg") { unit = "g"; amount = amount * 1000; }
+      if (unit === "l") { unit = "ml"; amount = amount * 1000; }
+      if (unit === "cl") { unit = "ml"; amount = amount * 10; }
+      return { amount: Math.round(amount * 100) / 100, unit };
+    }
+
+    // 500 g / 1 l / 250ml
+    m = s.match(/(\d+(?:[.,]\d+)?)\s*(ml|cl|l|g|kg)\b/i);
+    if (m) {
+      let amount = parseFloat(String(m[1]).replace(",", "."));
+      let unit = String(m[2]).toLowerCase();
+      if (!Number.isFinite(amount) || amount <= 0) return null;
+      if (unit === "kg") { unit = "g"; amount = amount * 1000; }
+      if (unit === "l") { unit = "ml"; amount = amount * 1000; }
+      if (unit === "cl") { unit = "ml"; amount = amount * 10; }
+      return { amount: Math.round(amount * 100) / 100, unit };
+    }
+
+    // 10 Stück / 10 stk / 10 pcs
+    m = s.match(/(\d+)\s*(stück|stk|pcs|pc)\b/i);
+    if (m) {
+      const amount = parseInt(m[1], 10);
+      if (!Number.isFinite(amount) || amount <= 0) return null;
+      return { amount, unit: "Stück" };
+    }
+
+    return null;
+  }
+
+  async function fetchOffSuggestion(state, persist, code) {
+    const c = cleanBarcode(code);
+    if (!c) return null;
+
+    const cache = ensureBarcodeCache(state);
+    const cached = cache[c];
+    if (cached && typeof cached === "object") return cached;
+
+    try {
+      const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(c)}.json`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("OFF fetch failed");
+      const json = await res.json();
+      const prod = json?.product;
+      if (!prod) return null;
+
+      const name = (prod.product_name || prod.product_name_de || prod.generic_name || "").trim();
+      const qty = parseOffQuantity(prod.quantity);
+      const nutriments = prod.nutriments || null;
+
+      const out = {
+        name,
+        amount: qty?.amount || 0,
+        unit: qty?.unit || "",
+        nutriments,
+        fetchedAt: new Date().toISOString()
+      };
+
+      cache[c] = out;
+      if (typeof persist === "function") persist();
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
+  function openReceiptGuidedScanModal(state, persist, receiptId, opts = {}) {
+    const onFinish = typeof opts.onFinish === "function" ? opts.onFinish : null;
+
+    const getReceipt = () => (state.receipts || []).find((r) => r && r.id === receiptId) || null;
+
+    const findNextItemId = (r) => {
+      const items = Array.isArray(r?.items) ? r.items : [];
+      const next = items.find((it) => it && it.kind === "item" && !it.matchedIngredientId);
+      return next ? next.id : null;
+    };
+
+    let currentItemId = null;
+    const r0 = getReceipt();
+    if (!r0) return window.ui?.toast?.("Bon nicht gefunden.");
+    currentItemId = findNextItemId(r0);
+
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+
+    const modal = document.createElement("div");
+    modal.className = "modal scan-modal";
+    modal.style.maxWidth = "720px";
+
+    modal.innerHTML = `
+      <div class="modal-header">
+        <div class="modal-title">Geführtes Scannen</div>
+        <button class="modal-close" data-action="close" title="Schließen">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="small muted2" id="rg-meta"></div>
+        <div style="display:flex; justify-content:space-between; gap:10px; align-items:center; margin-top:8px;">
+          <div class="small" id="rg-progress"></div>
+          <button class="info" data-action="openBon">Bon öffnen</button>
+        </div>
+
+        <div id="rg-next" style="margin-top:10px;"></div>
+
+        <div class="scan-video-wrap" style="margin-top:10px;">
+          <video class="scan-video" id="rg-video" autoplay playsinline muted></video>
+        </div>
+
+        <div class="small muted2" id="rg-msg" style="margin-top:10px;"></div>
+        <div id="rg-result" style="margin-top:12px;"></div>
+
+        <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:14px;">
+          <button data-action="resume">Weiter scannen</button>
+          <button class="primary" data-action="close">Schließen</button>
+        </div>
+      </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const video = modal.querySelector("#rg-video");
+    const metaEl = modal.querySelector("#rg-meta");
+    const progEl = modal.querySelector("#rg-progress");
+    const nextEl = modal.querySelector("#rg-next");
+    const msgEl = modal.querySelector("#rg-msg");
+    const resultEl = modal.querySelector("#rg-result");
+
+    let stream = null;
+    let detector = null;
+    let running = false;
+    let paused = false;
+    let tickTimer = null;
+
+    function close() {
+      stopCamera();
+      overlay.remove();
+      onFinish?.();
+    }
+
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+
+    function ensureDetector() {
+      if (detector) return detector;
+      if ("BarcodeDetector" in window) {
+        try {
+          detector = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "qr_code"] });
+          return detector;
+        } catch {}
+      }
+      detector = null;
+      return null;
+    }
+
+    async function startCamera() {
+      if (running) return;
+      const det = ensureDetector();
+      if (!det) {
+        msgEl.textContent = "Barcode-Scanner wird von diesem Browser nicht unterstützt.";
+        return;
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        video.srcObject = stream;
+        running = true;
+        paused = false;
+        msgEl.textContent = "Kamera aktiv – Barcode ins Bild halten.";
+        tick();
+      } catch (e) {
+        msgEl.textContent = "Kamera konnte nicht gestartet werden (Berechtigung?).";
+      }
+    }
+
+    function stopCamera() {
+      running = false;
+      paused = false;
+      if (tickTimer) clearTimeout(tickTimer);
+      tickTimer = null;
+      if (stream) {
+        try {
+          stream.getTracks().forEach((t) => t.stop());
+        } catch {}
+      }
+      stream = null;
+      try { video.srcObject = null; } catch {}
+    }
+
+    function pauseScan() {
+      paused = true;
+    }
+
+    function resumeScan() {
+      if (!running) return startCamera();
+      paused = false;
+      msgEl.textContent = "Weiter scannen…";
+      tick();
+    }
+
+    function getCurrentItem(r) {
+      if (!r) return null;
+      const items = Array.isArray(r.items) ? r.items : [];
+      if (currentItemId) {
+        const cur = items.find((x) => x && x.id === currentItemId) || null;
+        if (cur && cur.kind === "item" && !cur.matchedIngredientId) return cur;
+      }
+      currentItemId = findNextItemId(r);
+      return currentItemId ? items.find((x) => x && x.id === currentItemId) || null : null;
+    }
+
+    function render() {
+      const r = getReceipt();
+      if (!r) {
+        metaEl.textContent = "Bon nicht gefunden.";
+        progEl.textContent = "";
+        nextEl.innerHTML = "";
+        resultEl.innerHTML = "";
+        msgEl.textContent = "";
+        return;
+      }
+
+      const p = receiptProgress(r);
+      metaEl.textContent = `${r.store || "Bon"} · ${fmtDate(r.at)} · Gesamt: ${euro(Number(r.total) || 0)}`;
+      progEl.innerHTML = `Zuordnung: <b>${p.matched}/${p.total}</b>`;
+
+      const cur = getCurrentItem(r);
+      if (!cur) {
+        nextEl.innerHTML = `<div style="padding:10px; border:1px solid var(--border); border-radius:12px;">
+          <div style="font-weight:800;">Fertig ✓</div>
+          <div class="small muted2" style="margin-top:4px;">Alle Bon-Artikel wurden zugeordnet. Du kannst trotzdem weiter scannen (z.B. andere Sachen) oder schließen.</div>
+        </div>`;
+        resultEl.innerHTML = "";
+        msgEl.textContent = "Fertig – du kannst schließen oder den Bon öffnen.";
+        pauseScan();
+        stopCamera();
+        return;
+      }
+
+      nextEl.innerHTML = `
+        <div style="padding:10px; border:1px solid var(--border); border-radius:12px;">
+          <div class="small muted2">Als nächstes (laut Bon):</div>
+          <div style="font-weight:800; margin-top:4px;">${esc(cur.rawName || "(unbekannt)")}</div>
+          <div class="small muted2" style="margin-top:4px;">${Math.max(1, Number(cur.qty) || 1)}× · ${euro(Number(cur.lineTotal) || 0)}</div>
+        </div>
+      `;
+      resultEl.innerHTML = "";
+      msgEl.textContent = "Barcode scannen…";
+    }
+
+    async function assignAndEdit(ingredientId, scannedCode) {
+      const r = getReceipt();
+      const cur = getCurrentItem(r);
+      if (!r || !cur) return;
+
+      cur.matchedIngredientId = ingredientId || null;
+      r.updatedAt = new Date().toISOString();
+
+      upsertPurchaseLogFromReceiptItem(state, r, cur);
+      persist();
+
+      // Edit modal (Preis/Haltbarkeit) und danach direkt weiter scannen
+      const ing = getIng(state, ingredientId);
+      if (!ing || !window.ingredients?.openIngredientModal) {
+        currentItemId = findNextItemId(r);
+        render();
+        resumeScan();
+        return;
+      }
+
+      pauseScan();
+      stopCamera();
+
+      window.ingredients.openIngredientModal(state, persist, ing, {
+        noNavigate: true,
+        onDone: () => {
+          currentItemId = findNextItemId(getReceipt() || r);
+          render();
+          startCamera();
+        }
+      });
+    }
+
+    async function createAndAssignNew(scannedCode) {
+      const r = getReceipt();
+      const cur = getCurrentItem(r);
+      if (!r || !cur) return;
+
+      const off = await fetchOffSuggestion(state, persist, scannedCode);
+      const qty = off?.amount && off?.unit ? { amount: off.amount, unit: off.unit } : null;
+
+      pauseScan();
+      stopCamera();
+
+      if (!window.ingredients?.openIngredientModal) {
+        window.ui?.toast?.("Zutaten-Modal nicht verfügbar.");
+        startCamera();
+        return;
+      }
+
+      window.ingredients.openIngredientModal(state, persist, null, {
+        noNavigate: true,
+        prefillBarcode: scannedCode,
+        prefillName: (off?.name || cur.rawName || "").trim(),
+        prefillAmount: qty?.amount || 1,
+        prefillUnit: qty?.unit || "Stück",
+        prefillNutriments: off?.nutriments || null,
+        onSaved: (newIng) => {
+          try {
+            const rr = getReceipt();
+            const item = (rr?.items || []).find((x) => x && x.id === currentItemId) || null;
+            if (rr && item && !item.matchedIngredientId && newIng?.id) {
+              item.matchedIngredientId = newIng.id;
+              rr.updatedAt = new Date().toISOString();
+              upsertPurchaseLogFromReceiptItem(state, rr, item);
+              persist();
+            }
+          } catch {}
+        },
+        onDone: () => {
+          currentItemId = findNextItemId(getReceipt() || r);
+          render();
+          startCamera();
+        }
+      });
+    }
+
+    async function handleBarcodeFound(codeRaw) {
+      const code = cleanBarcode(codeRaw);
+      if (!code) return;
+
+      const r = getReceipt();
+      const cur = getCurrentItem(r);
+      if (!r || !cur) return;
+
+      pauseScan();
+
+      const ingByBarcode = findIngredientByBarcode(state, code);
+      if (ingByBarcode) {
+        const score = nameSimilarity(cur.rawName || "", ingByBarcode.name || "");
+        const OK = 0.35;
+
+        if (score < OK) {
+          // Suspicious match -> ask to confirm
+          resultEl.innerHTML = `
+            <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
+              <div style="font-weight:800;">Erkannt: ${esc(ingByBarcode.name || "")}</div>
+              <div class="small muted2" style="margin-top:4px;">Das passt evtl. nicht zu „${esc(cur.rawName || "")}“. Trotzdem zuordnen?</div>
+              <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
+                <button class="primary" data-action="assignIng" data-ingredient-id="${esc(ingByBarcode.id)}" data-code="${esc(code)}">Trotzdem zuordnen</button>
+                <button data-action="resume">Weiter scannen</button>
+              </div>
+            </div>
+          `;
+          msgEl.textContent = "Bestätigen oder weiter scannen.";
+          return;
+        }
+
+        // Auto-assign + edit
+        resultEl.innerHTML = `<div class="small muted2">Zuordnung: ${esc(ingByBarcode.name || "")} …</div>`;
+        await assignAndEdit(ingByBarcode.id, code);
+        return;
+      }
+
+      const sug = suggestIngredientsByName(state, cur.rawName || "", 3);
+      const sugRows = sug.length
+        ? sug.map((x) => `
+            <button data-action="assignIng" data-ingredient-id="${esc(x.ing.id)}" data-code="${esc(code)}" style="text-align:left;">
+              ${esc(x.ing.name || "")} <span class="small muted2">(${Math.round(x.score * 100)}%)</span>
+            </button>
+          `).join("")
+        : `<div class="small muted2">Keine passenden Vorschläge.</div>`;
+
+      resultEl.innerHTML = `
+        <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
+          <div style="font-weight:800;">Unbekannter Barcode</div>
+          <div class="small muted2" style="margin-top:4px;">Wähle eine passende Zutat oder lege eine neue an.</div>
+          <div style="display:grid; gap:8px; margin-top:10px;">${sugRows}</div>
+          <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:12px;">
+            <button class="success" data-action="newIng" data-code="${esc(code)}">+ Neue Zutat aus Barcode</button>
+            <button class="info" data-action="openBon">Manuell zuordnen</button>
+            <button data-action="resume">Weiter scannen</button>
+          </div>
+        </div>
+      `;
+      msgEl.textContent = "Unbekannter Barcode – Auswahl nötig.";
+    }
+
+    async function tick() {
+      if (!running || paused) return;
+      const det = ensureDetector();
+      if (!det) return;
+
+      try {
+        const codes = await det.detect(video);
+        if (codes && codes.length) {
+          const raw = codes[0]?.rawValue || "";
+          if (raw) return handleBarcodeFound(raw);
+        }
+      } catch {}
+      tickTimer = setTimeout(tick, 200);
+    }
+
+    modal.addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("button[data-action]");
+      if (!btn) return;
+      const a = btn.getAttribute("data-action");
+
+      if (a === "close") return close();
+
+      if (a === "openBon") {
+        openReceiptDetailModal(state, persist, receiptId);
+        return;
+      }
+
+      if (a === "resume") {
+        resultEl.innerHTML = "";
+        resumeScan();
+        return;
+      }
+
+      if (a === "assignIng") {
+        const ingId = btn.getAttribute("data-ingredient-id");
+        const code = btn.getAttribute("data-code");
+        resultEl.innerHTML = `<div class="small muted2">Zuordnung…</div>`;
+        await assignAndEdit(ingId, code);
+        return;
+      }
+
+      if (a === "newIng") {
+        const code = btn.getAttribute("data-code");
+        resultEl.innerHTML = `<div class="small muted2">Open Food Facts…</div>`;
+        await createAndAssignNew(code);
+        return;
+      }
+    });
+
+    
+
+  // --- 0.4.2: Freies Scannen für Bons (Barcode -> Vorschläge (Top 3 Bon-Items) -> Bearbeiten -> weiter scannen) ---
+  function suggestReceiptItemsByName(receipt, queryName, limit = 3) {
+    const items = Array.isArray(receipt?.items) ? receipt.items : [];
+    const open = items.filter((it) => it && it.kind === "item" && !it.matchedIngredientId);
+    if (!open.length) return [];
+
+    const q = String(queryName || "").trim();
+    if (!q) return open.slice(0, limit).map((it) => ({ it, score: 0 }));
+
+    const scored = open
+      .map((it) => ({ it, score: nameSimilarity(q, it.rawName || "") }))
+      .sort((a, b) => b.score - a.score);
+
+    // Wenn alles 0 ist, zeigen wir einfach die ersten offenen Items.
+    if (!scored[0] || scored[0].score <= 0) return open.slice(0, limit).map((it) => ({ it, score: 0 }));
+    return scored.slice(0, limit);
+  }
+
+  function isGoodAutoMatch(top, second) {
+    const s1 = top?.score ?? 0;
+    const s2 = second?.score ?? 0;
+    // konservativ: nur auto wenn wirklich deutlich
+    if (s1 >= 0.78) return true;
+    if (s1 >= 0.58 && (s1 - s2) >= 0.22) return true;
+    return false;
+  }
+
+  function openReceiptFreeScanModal(state, persist, receiptId, opts = {}) {
+    const onFinish = typeof opts.onFinish === "function" ? opts.onFinish : null;
+    const getReceipt = () => (state.receipts || []).find((r) => r && r.id === receiptId) || null;
+
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+
+    const modal = document.createElement("div");
+    modal.className = "modal scan-modal";
+    modal.style.maxWidth = "720px";
+
+    modal.innerHTML = `
+      <div class="modal-header">
+        <div class="modal-title">Freies Scannen</div>
+        <button class="modal-close" data-action="close" title="Schließen">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="small muted2" id="rf-meta"></div>
+        <div style="display:flex; justify-content:space-between; gap:10px; align-items:center; margin-top:8px;">
+          <div class="small" id="rf-progress"></div>
+          <button class="info" data-action="openBon">Bon öffnen</button>
+        </div>
+
+        <div id="rf-banner" style="margin-top:10px;"></div>
+
+        <div class="scan-video-wrap" style="margin-top:10px;">
+          <video class="scan-video" id="rf-video" autoplay playsinline muted></video>
+        </div>
+
+        <div class="small muted2" id="rf-msg" style="margin-top:10px;"></div>
+        <div id="rf-result" style="margin-top:12px;"></div>
+
+        <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:14px;">
+          <button data-action="resume">Weiter scannen</button>
+          <button class="primary" data-action="close">Schließen</button>
+        </div>
+      </div>
+    `;
+
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    const video = modal.querySelector("#rf-video");
+    const metaEl = modal.querySelector("#rf-meta");
+    const progEl = modal.querySelector("#rf-progress");
+    const bannerEl = modal.querySelector("#rf-banner");
+    const msgEl = modal.querySelector("#rf-msg");
+    const resultEl = modal.querySelector("#rf-result");
+
+    let stream = null;
+    let detector = null;
+    let running = false;
+    let paused = false;
+    let tickTimer = null;
+
+    let lastCode = "";
+    let lastAt = 0;
+
+    function close() {
+      stopCamera();
+      overlay.remove();
+      onFinish?.();
+    }
+
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close();
+    });
+
+    function ensureDetector() {
+      if (detector) return detector;
+      if ("BarcodeDetector" in window) {
+        try {
+          detector = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "qr_code"] });
+          return detector;
+        } catch {}
+      }
+      detector = null;
+      return null;
+    }
+
+    async function startCamera() {
+      if (running) return;
+      const det = ensureDetector();
+      if (!det) {
+        msgEl.textContent = "Barcode-Scanner wird von diesem Browser nicht unterstützt.";
+        return;
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+        video.srcObject = stream;
+        running = true;
+        paused = false;
+        msgEl.textContent = "Kamera aktiv – Barcode ins Bild halten.";
+        tick();
+      } catch {
+        msgEl.textContent = "Kamera konnte nicht gestartet werden (Berechtigung?).";
+      }
+    }
+
+    function stopCamera() {
+      running = false;
+      paused = false;
+      if (tickTimer) clearTimeout(tickTimer);
+      tickTimer = null;
+      if (stream) {
+        try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+      }
+      stream = null;
+      try { video.srcObject = null; } catch {}
+    }
+
+    function pauseScan() { paused = true; }
+
+    function resumeScan() {
+      if (!running) return startCamera();
+      paused = false;
+      msgEl.textContent = "Weiter scannen…";
+      tick();
+    }
+
+    function renderHeader() {
+      const r = getReceipt();
+      if (!r) {
+        metaEl.textContent = "Bon nicht gefunden.";
+        progEl.textContent = "";
+        bannerEl.innerHTML = "";
+        return;
+      }
+      const p = receiptProgress(r);
+      metaEl.textContent = `${r.store || "Bon"} · ${fmtDate(r.at)} · Gesamt: ${euro(Number(r.total) || 0)}`;
+      progEl.innerHTML = `Zuordnung: <b>${p.matched}/${p.total}</b>`;
+      if (p.total > 0 && p.matched >= p.total) {
+        bannerEl.innerHTML = `
+          <div style="padding:10px; border:1px solid var(--border); border-radius:12px;">
+            <div style="font-weight:800;">Fertig ✓</div>
+            <div class="small muted2" style="margin-top:4px;">Alle Bon-Artikel sind zugeordnet. Du kannst trotzdem weiter scannen (z.B. extra Produkte).</div>
+          </div>
+        `;
+      } else {
+        bannerEl.innerHTML = `
+          <div style="padding:10px; border:1px solid var(--border); border-radius:12px;">
+            <div style="font-weight:800;">Bon offen</div>
+            <div class="small muted2" style="margin-top:4px;">Scanne Produkte – bei Unsicherheit wählst du den passenden Bon-Artikel aus.</div>
+          </div>
+        `;
+      }
+    }
+
+    function pickReceiptItemById(r, itemId) {
+      if (!r) return null;
+      return (r.items || []).find((x) => x && x.id === itemId) || null;
+    }
+
+    async function editIngredientThenResume(ing) {
+      if (!ing || !window.ingredients?.openIngredientModal) {
+        resumeScan();
+        return;
+      }
+      pauseScan();
+      stopCamera();
+      window.ingredients.openIngredientModal(state, persist, ing, {
+        noNavigate: true,
+        onDone: () => {
+          renderHeader();
+          startCamera();
+        }
+      });
+    }
+
+    async function assignReceiptItemAndEdit(r, itemId, ingredientId) {
+      const item = pickReceiptItemById(r, itemId);
+      if (!r || !item) return;
+      item.matchedIngredientId = ingredientId || null;
+      r.updatedAt = new Date().toISOString();
+      upsertPurchaseLogFromReceiptItem(state, r, item);
+      persist();
+
+      const ing = getIng(state, ingredientId);
+      await editIngredientThenResume(ing);
+    }
+
+    async function createIngredientFlow({ code, prefillName, prefillAmount, prefillUnit, prefillNutriments, onCreated }) {
+      if (!window.ingredients?.openIngredientModal) {
+        window.ui?.toast?.("Zutaten-Modal nicht verfügbar.");
+        resumeScan();
+        return;
+      }
+      pauseScan();
+      stopCamera();
+      window.ingredients.openIngredientModal(state, persist, null, {
+        noNavigate: true,
+        prefillBarcode: code,
+        prefillName: prefillName || "",
+        prefillAmount: prefillAmount || 1,
+        prefillUnit: prefillUnit || "Stück",
+        prefillNutriments: prefillNutriments || null,
+        onSaved: (newIng) => {
+          try { onCreated?.(newIng); } catch {}
+        },
+        onDone: () => {
+          renderHeader();
+          startCamera();
+        }
+      });
+    }
+
+    function renderPickList({ title, subtitle, picksHTML, extraHTML }) {
+      resultEl.innerHTML = `
+        <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
+          <div style="font-weight:800;">${esc(title || "Auswahl")}</div>
+          ${subtitle ? `<div class="small muted2" style="margin-top:4px;">${esc(subtitle)}</div>` : ``}
+          <div style="display:grid; gap:8px; margin-top:10px;">${picksHTML || ""}</div>
+          ${extraHTML ? `<div style="margin-top:12px;">${extraHTML}</div>` : ``}
+        </div>
+      `;
+    }
+
+    async function handleBarcodeFound(codeRaw) {
+      const code = cleanBarcode(codeRaw);
+      if (!code) return;
+
+      const now = Date.now();
+      if (code === lastCode && (now - lastAt) < 1400) return; // Doppelt-Scan abfangen
+      lastCode = code;
+      lastAt = now;
+
+      const r = getReceipt();
+      if (!r) return;
+
+      pauseScan();
+      renderHeader();
+
+      const p = receiptProgress(r);
+      const openItems = (r.items || []).filter((it) => it && it.kind === "item" && !it.matchedIngredientId);
+
+      const ing = findIngredientByBarcode(state, code);
+      if (ing) {
+        // Wenn Bon schon fertig: nur bearbeiten oder weiter
+        if (!openItems.length) {
+          renderPickList({
+            title: `Erkannt: ${ing.name || "Zutat"}`,
+            subtitle: "Bon ist fertig – das Produkt ist vermutlich extra / nicht auf dem Bon.",
+            picksHTML: "",
+            extraHTML: `
+              <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+                <button class="success" data-action="editIng" data-ingredient-id="${esc(ing.id)}">Zutat bearbeiten</button>
+                <button data-action="resume">Weiter scannen</button>
+              </div>
+            `
+          });
+          msgEl.textContent = "Bon fertig – optional bearbeiten.";
+          return;
+        }
+
+        const sug = suggestReceiptItemsByName(r, ing.name || "", 3);
+        const picks = sug.map((x) => {
+          const it = x.it;
+          const score = Number(x.score) || 0;
+          const pct = score > 0 ? `${Math.round(score * 100)}%` : "";
+          return `
+            <button data-action="pickItem" data-item-id="${esc(it.id)}" data-ingredient-id="${esc(ing.id)}" style="text-align:left;">
+              ${esc(it.rawName || "(unbekannt)")} <span class="small muted2">${esc(Math.max(1, Number(it.qty) || 1))}× · ${esc(euro(Number(it.lineTotal) || 0))}${pct ? " · " + pct : ""}</span>
+            </button>
+          `;
+        }).join("");
+
+        // Auto, wenn sehr sicher
+        if (sug[0] && isGoodAutoMatch(sug[0], sug[1])) {
+          msgEl.textContent = `Zuordnung (auto): ${sug[0].it.rawName}`;
+          resultEl.innerHTML = `<div class="small muted2">Zuordnung…</div>`;
+          await assignReceiptItemAndEdit(r, sug[0].it.id, ing.id);
+          return;
+        }
+
+        renderPickList({
+          title: `Erkannt: ${ing.name || "Zutat"}`,
+          subtitle: "Welcher Bon-Artikel passt dazu? (Top 3)",
+          picksHTML: picks || `<div class="small muted2">Keine offenen Bon-Artikel.</div>`,
+          extraHTML: `
+            <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+              <button class="info" data-action="notOnBon" data-ingredient-id="${esc(ing.id)}">Nicht auf Bon</button>
+              <button class="success" data-action="editIng" data-ingredient-id="${esc(ing.id)}">Zutat bearbeiten</button>
+              <button data-action="resume">Weiter scannen</button>
+            </div>
+          `
+        });
+        msgEl.textContent = "Bitte Bon-Artikel wählen oder überspringen.";
+        return;
+      }
+
+      // Unbekannter Barcode
+      msgEl.textContent = "Unbekannter Barcode – Vorschläge werden geladen…";
+      const off = await fetchOffSuggestion(state, persist, code);
+      const offName = String(off?.name || "").trim();
+
+      if (!openItems.length) {
+        renderPickList({
+          title: offName ? `Unbekannt: ${offName}` : "Unbekannter Barcode",
+          subtitle: "Bon ist fertig – du kannst das Produkt trotzdem als Zutat anlegen.",
+          picksHTML: "",
+          extraHTML: `
+            <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+              <button class="success" data-action="newExtra" data-code="${esc(code)}">+ Neues Produkt hinzufügen</button>
+              <button data-action="resume">Weiter scannen</button>
+            </div>
+          `
+        });
+        msgEl.textContent = "Bon fertig – extra Produkt möglich.";
+        return;
+      }
+
+      const sug = suggestReceiptItemsByName(r, offName || code, 3);
+      const picks = sug.map((x) => {
+        const it = x.it;
+        const score = Number(x.score) || 0;
+        const pct = score > 0 ? `${Math.round(score * 100)}%` : "";
+        return `
+          <button data-action="createAndAssign" data-item-id="${esc(it.id)}" data-code="${esc(code)}" style="text-align:left;">
+            ${esc(it.rawName || "(unbekannt)")} <span class="small muted2">${esc(Math.max(1, Number(it.qty) || 1))}× · ${esc(euro(Number(it.lineTotal) || 0))}${pct ? " · " + pct : ""}</span>
+          </button>
+        `;
+      }).join("");
+
+      renderPickList({
+        title: offName ? `Unbekannt: ${offName}` : "Unbekannter Barcode",
+        subtitle: "Wähle den passenden Bon-Artikel (Top 3) oder lege das Produkt als extra an.",
+        picksHTML: picks || `<div class="small muted2">Keine offenen Bon-Artikel.</div>`,
+        extraHTML: `
+          <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+            <button class="success" data-action="newExtra" data-code="${esc(code)}">+ Neues Produkt hinzufügen</button>
+            <button class="info" data-action="openBon">Bon öffnen</button>
+            <button data-action="resume">Weiter scannen</button>
+          </div>
+        `
+      });
+
+      msgEl.textContent = "Auswahl nötig.";
+    }
+
+    async function tick() {
+      if (!running || paused) return;
+      const det = ensureDetector();
+      if (!det) return;
+
+      try {
+        const codes = await det.detect(video);
+        if (codes && codes.length) {
+          const raw = codes[0]?.rawValue || "";
+          if (raw) return handleBarcodeFound(raw);
+        }
+      } catch {}
+      tickTimer = setTimeout(tick, 200);
+    }
+
+    modal.addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("button[data-action]");
+      if (!btn) return;
+      const a = btn.getAttribute("data-action");
+
+      if (a === "close") return close();
+      if (a === "openBon") return openReceiptDetailModal(state, persist, receiptId);
+      if (a === "resume") {
+        resultEl.innerHTML = "";
+        resumeScan();
+        return;
+      }
+
+      const r = getReceipt();
+      if (!r) return;
+
+      if (a === "editIng") {
+        const ingId = btn.getAttribute("data-ingredient-id");
+        const ing = getIng(state, ingId);
+        await editIngredientThenResume(ing);
+        return;
+      }
+
+      if (a === "notOnBon") {
+        // einfach weiter (optional: edit)
+        resultEl.innerHTML = "";
+        resumeScan();
+        return;
+      }
+
+      if (a === "pickItem") {
+        const itemId = btn.getAttribute("data-item-id");
+        const ingId = btn.getAttribute("data-ingredient-id");
+        resultEl.innerHTML = `<div class="small muted2">Zuordnung…</div>`;
+        await assignReceiptItemAndEdit(r, itemId, ingId);
+        return;
+      }
+
+      if (a === "createAndAssign") {
+        const itemId = btn.getAttribute("data-item-id");
+        const code = btn.getAttribute("data-code");
+        const off = await fetchOffSuggestion(state, persist, code);
+        const qty = off?.amount && off?.unit ? { amount: off.amount, unit: off.unit } : null;
+        await createIngredientFlow({
+          code,
+          prefillName: (off?.name || "").trim(),
+          prefillAmount: qty?.amount || 1,
+          prefillUnit: qty?.unit || "Stück",
+          prefillNutriments: off?.nutriments || null,
+          onCreated: (newIng) => {
+            if (!newIng?.id) return;
+            const item = pickReceiptItemById(r, itemId);
+            if (!item) return;
+            item.matchedIngredientId = newIng.id;
+            r.updatedAt = new Date().toISOString();
+            upsertPurchaseLogFromReceiptItem(state, r, item);
+            persist();
+          }
+        });
+        return;
+      }
+
+      if (a === "newExtra") {
+        const code = btn.getAttribute("data-code");
+        const off = await fetchOffSuggestion(state, persist, code);
+        const qty = off?.amount && off?.unit ? { amount: off.amount, unit: off.unit } : null;
+        await createIngredientFlow({
+          code,
+          prefillName: (off?.name || "").trim(),
+          prefillAmount: qty?.amount || 1,
+          prefillUnit: qty?.unit || "Stück",
+          prefillNutriments: off?.nutriments || null,
+          onCreated: () => {}
+        });
+        return;
+      }
+    });
+
+    renderHeader();
+    startCamera();
+  }
+
+// initial
+    render();
+    startCamera();
+  }
+
+function openReceiptsHub(state, persist) {
+    const render = () => {
+      const receipts = (state.receipts || []).slice().sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+      const rows = receipts.map((r) => {
+        const p = receiptProgress(r);
+        return `
+          <div style="border:1px solid var(--border); border-radius:14px; padding:10px; margin:8px 0;">
+            <div style="display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+              <div style="min-width:0;">
+                <div style="font-weight:800;">${esc(r.store || "Bon")} · ${esc(fmtDate(r.at))}</div>
+                <div class="small muted2" style="margin-top:2px;">Gesamt: <b>${esc(euro(Number(r.total) || 0))}</b> · ${esc(p.matched)}/${esc(p.total)} zugeordnet</div>
+              </div>
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+                <button class="success" data-action="scanReceipt" data-receipt-id="${esc(r.id)}">Scannen</button>
+                <button class="info" data-action="openReceipt" data-receipt-id="${esc(r.id)}">Öffnen</button>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      return `
+        <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:space-between; align-items:center;">
+          <button class="success" data-action="importReceipt">Bon importieren</button>
+          <div class="small muted2">PDF (online) oder Text einfügen (offline)</div>
+        </div>
+        <div style="margin-top:10px;">
+          ${rows || `<div class="small">Noch keine Bons importiert.</div>`}
+        </div>
+      `;
+    };
+
+    const modal = window.ui?.modal?.({
+      title: "Bons",
+      contentHTML: render(),
+      okText: "Schließen",
+      cancelText: " ",
+      onConfirm: (_m, close) => close()
+    });
+    if (!modal) return;
+
+    try {
+      const cancelBtn = modal.modal.querySelector('button[data-action="cancel"]');
+      if (cancelBtn) cancelBtn.style.display = "none";
+    } catch {}
+
+    modal.modal.addEventListener("click", (ev) => {
+      const btn = ev.target.closest("button[data-action]");
+      if (!btn) return;
+      const a = btn.getAttribute("data-action");
+      if (a === "importReceipt") {
+        openReceiptImport(state, persist, () => {
+          const body = modal.modal.querySelector(".modal-body");
+          if (body) body.innerHTML = render();
+        });
+        return;
+      }
+      if (a === "scanReceipt") {
+        const id = btn.getAttribute("data-receipt-id");
+        if (!id) return;
+
+        window.ui?.modal?.({
+          title: "Scannen",
+          contentHTML: `<div class="small muted2">Modus wählen:</div>
+            <div class="small" style="margin-top:6px;">
+              <b>Geführt</b> zeigt dir den nächsten Bon-Artikel. <br/>
+              <b>Frei</b> zeigt dir Top-3 Vorschläge.
+            </div>`,
+          okText: "Geführt",
+          cancelText: "Frei",
+          okClass: "success",
+          onConfirm: (_m3, close3) => {
+            close3();
+            openReceiptGuidedScanModal(state, persist, id, {
+              onFinish: () => {
+                const body = modal.modal.querySelector(".modal-body");
+                if (body) body.innerHTML = render();
+              }
+            });
+          },
+          onCancel: () => {
+            openReceiptFreeScanModal(state, persist, id, {
+              onFinish: () => {
+                const body = modal.modal.querySelector(".modal-body");
+                if (body) body.innerHTML = render();
+              }
+            });
+          }
+        });
+        return;
+      }
+
+      if (a === "openReceipt") {
+        const id = btn.getAttribute("data-receipt-id");
+        if (!id) return;
+        openReceiptDetailModal(state, persist, id);
+      }
+    });
+  }
+
+  function openReceiptImport(state, persist, onDone) {
+    const content = `
+      <div class="small muted2" style="margin-bottom:8px;">
+        Du kannst entweder ein PDF auswählen (online lädt die PDF-Lib) oder den Text aus dem Bon hier einfügen (offline).
+      </div>
+      <div style="display:grid; gap:10px;">
+        <input id="receipt-file" type="file" accept="application/pdf,text/plain,.txt" />
+        <textarea id="receipt-text" class="input" style="min-height:140px; white-space:pre;" placeholder="Bon-Text hier einfügen…"></textarea>
+      </div>
+      <div class="small muted2" style="margin-top:8px;">
+        Tipp: Wenn PDF-Import nicht geht, öffne den Bon am PC, kopiere alles und füge es hier ein.
+      </div>
+    `;
+
+    window.ui?.modal?.({
+      title: "Bon importieren",
+      contentHTML: content,
+      okText: "Vorschau",
+      cancelText: "Abbrechen",
+      onConfirm: async (m, close) => {
+        const file = m.querySelector("#receipt-file")?.files?.[0] || null;
+        const pasted = (m.querySelector("#receipt-text")?.value || "").trim();
+
+        if (!file && !pasted) {
+          window.ui?.toast?.("Bitte PDF wählen oder Text einfügen.");
+          return;
+        }
+
+        let text = pasted;
+        try {
+          if (!text && file) {
+            if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+              window.ui?.toast?.("PDF wird gelesen…", { timeoutMs: 3500 });
+              text = await extractTextFromPdfFile(file);
+            } else {
+              text = await file.text();
+            }
+          }
+        } catch (err) {
+          console.warn(err);
+          window.ui?.toast?.("PDF-Import fehlgeschlagen. Bitte Text einfügen.");
+          return;
+        }
+
+        const meta = guessReceiptMeta(text);
+        const items = parseReceiptItemsFromText(text);
+
+        if (!items.length) {
+          window.ui?.toast?.("Keine Artikel erkannt. Bitte Text prüfen.");
+          return;
+        }
+
+        const total = items.reduce((s, it) => s + (Number(it.lineTotal) || 0), 0);
+
+        // preview
+        const previewRows = items.slice(0, 18).map((it) => `
+          <div class="small" style="display:flex; justify-content:space-between; gap:10px;">
+            <span style="max-width:72%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(it.rawName)}</span>
+            <span>${esc(it.qty)}×</span>
+            <span>${esc(euro(it.lineTotal))}</span>
+          </div>
+        `).join("");
+
+        window.ui?.modal?.({
+          title: "Bon Vorschau",
+          contentHTML: `
+            <div class="small muted2">${esc(meta.store)} · ${esc(fmtDate(meta.at))}</div>
+            <div class="small muted2" style="margin-top:4px;">Erkannt: <b>${esc(items.length)}</b> Position(en). Gesamt (berechnet): <b>${esc(euro(total))}</b></div>
+            <div style="margin-top:10px; display:grid; gap:6px;">${previewRows}</div>
+            ${items.length > 18 ? `<div class="small muted2" style="margin-top:8px;">… und ${esc(items.length - 18)} weitere.</div>` : ``}
+          `,
+          okText: "Importieren",
+          cancelText: "Abbrechen",
+          onConfirm: (_m2, close2) => {
+            const receipt = {
+              id: uid(),
+              at: meta.at,
+              store: meta.store,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              total: Math.round(total * 100) / 100,
+              items
+            };
+
+            if (!Array.isArray(state.receipts)) state.receipts = [];
+            state.receipts.push(receipt);
+
+            // purchaseLog sofort anlegen (A)
+            for (const it of items) {
+              upsertPurchaseLogFromReceiptItem(state, receipt, it);
+            }
+
+            persist();
+            close2();
+            close();
+
+            onDone?.();
+            // direkt in Detail, damit man zuordnen kann
+            openReceiptDetailModal(state, persist, receipt.id);
+          }
+        });
+      }
+    });
+  }
+
+
   // ---- undo (in-memory) ----
   let undoSnapshot = null;
   let undoTimer = null;
@@ -43,6 +1608,7 @@
     if (!Array.isArray(state.shopping)) state.shopping = [];
     if (!Array.isArray(state.pantry)) state.pantry = [];
     if (!Array.isArray(state.purchaseLog)) state.purchaseLog = [];
+    if (!Array.isArray(state.receipts)) state.receipts = [];
     if (!Array.isArray(state.recipes)) state.recipes = [];
     if (!Array.isArray(state.plannedRecipes)) state.plannedRecipes = [];
 
@@ -650,6 +2216,11 @@
           return;
         }
 
+        if (action === "receipts") {
+          openReceiptsHub(state, persist);
+          return;
+        }
+
         if (action === "planClean") {
           const ok = window.confirm(
             "Bereinigen reduziert Plan-Zutaten auf den Bedarf der geplanten Rezepte.\n\nManuelle Extras können dabei verschwinden.\n\nFortfahren?"
@@ -823,6 +2394,7 @@
       `
       : `
         <button class="info" data-action="start" ${groups.length === 0 ? "disabled" : ""}>Einkaufen starten</button>
+        <button class="info" data-action="receipts">Bon</button>
         <span class="small" style="opacity:0.9;">Gesamt: <b>${esc(euro(allTotal))}</b></span>
       `;
 
