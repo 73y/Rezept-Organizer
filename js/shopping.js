@@ -1549,7 +1549,12 @@ function openReceiptsHub(state, persist) {
         <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
           <button id="receipt-pick-btn" type="button" class="info">PDF auswählen</button>
           <div id="receipt-picked-name" class="small muted2">Keine Datei gewählt</div>
-          <input id="receipt-file" type="file" accept=".pdf,application/pdf,text/plain,.txt" style="display:none" />
+          <!--
+            WICHTIG (Android): nicht display:none, sonst kann der Picker "nichts" tun.
+            Außerdem kein capture-Attribut, sonst bietet Samsung oft nur Kamera/Galerie.
+          -->
+          <input id="receipt-file" type="file" accept=".pdf,application/pdf,text/plain,.txt"
+            style="position:absolute; left:-9999px; width:1px; height:1px; opacity:0;" />
         </div>
         <textarea id="receipt-text" class="input" style="min-height:140px; white-space:pre;" placeholder="Bon-Text hier einfügen…"></textarea>
       </div>
@@ -1558,7 +1563,7 @@ function openReceiptsHub(state, persist) {
       </div>
     `;
 
-    window.ui?.modal?.({
+    const modal = window.ui?.modal?.({
       title: "Bon importieren",
       contentHTML: content,
       okText: "Vorschau",
@@ -1647,6 +1652,30 @@ function openReceiptsHub(state, persist) {
         });
       }
     });
+
+    // PDF picker wiring
+    try {
+      const root = modal?.modal || document;
+      const pickBtn = root.querySelector("#receipt-pick-btn");
+      const fileInput = root.querySelector("#receipt-file");
+      const nameEl = root.querySelector("#receipt-picked-name");
+
+      if (pickBtn && fileInput) {
+        pickBtn.addEventListener("click", () => {
+          // allow selecting same file again
+          try { fileInput.value = ""; } catch {}
+          fileInput.click();
+        });
+
+        fileInput.addEventListener("change", () => {
+          const f = fileInput.files?.[0] || null;
+          try { root.__receiptFile = f; } catch {}
+          if (nameEl) nameEl.textContent = f ? f.name : "Keine Datei gewählt";
+        });
+      }
+    } catch (e) {
+      console.warn("Receipt PDF picker hook failed", e);
+    }
   }
 
 
