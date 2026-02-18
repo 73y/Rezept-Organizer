@@ -390,7 +390,7 @@ modal.modal.addEventListener("change", (ev) => {
 
       if (v === "__new__") {
         const suggested = it.rawName || "";
-        window.ui?.modal?.({
+        const modal = window.ui?.modal?.({
           title: "Neue Zutat",
           contentHTML: `
             <div class="small muted2" style="margin-bottom:8px;">Name:</div>
@@ -416,6 +416,74 @@ modal.modal.addEventListener("change", (ev) => {
       }
 
       doSet(v || null);
+
+    if (!modal) return;
+    try {
+      const m = modal.modal;
+      const pickBtn = m.querySelector('#receipt-pick-btn');
+      const fileInput = m.querySelector('#receipt-file');
+      const fileNameEl = m.querySelector('#receipt-picked-name');
+
+      const setFileLabel = (file) => {
+        if (!fileNameEl) return;
+        fileNameEl.textContent = file ? file.name : 'Keine Datei gewählt';
+      };
+
+      // Fallback: klassischer <input type=file>
+      const openHiddenInput = () => {
+        if (!fileInput) return;
+        fileInput.value = '';
+        fileInput.click();
+      };
+
+      // Bevorzugt: Native File-Picker (öffnet auf Android zuverlässig "Eigene Dateien")
+      const tryNativePicker = async () => {
+        if (!window.showOpenFilePicker) return null;
+        try {
+          const [handle] = await window.showOpenFilePicker({
+            multiple: false,
+            types: [
+              {
+                description: 'PDF',
+                accept: { 'application/pdf': ['.pdf'] }
+              },
+              {
+                description: 'Text',
+                accept: { 'text/plain': ['.txt', '.text'] }
+              }
+            ]
+          });
+          if (!handle) return null;
+          const f = await handle.getFile();
+          return f || null;
+        } catch (_) {
+          return null;
+        }
+      };
+
+      if (fileInput) {
+        fileInput.addEventListener('change', () => {
+          const f = fileInput.files?.[0] || null;
+          m.__receiptFile = f;
+          setFileLabel(f);
+        });
+      }
+
+      if (pickBtn) {
+        pickBtn.addEventListener('click', async () => {
+          const f = await tryNativePicker();
+          if (f) {
+            m.__receiptFile = f;
+            setFileLabel(f);
+            return;
+          }
+          openHiddenInput();
+        });
+      }
+    } catch (err) {
+      console.warn('Receipt picker init failed', err);
+    }
+
     });
   }
 
@@ -1478,7 +1546,11 @@ function openReceiptsHub(state, persist) {
         Du kannst entweder ein PDF auswählen (online lädt die PDF-Lib) oder den Text aus dem Bon hier einfügen (offline).
       </div>
       <div style="display:grid; gap:10px;">
-        <input id="receipt-file" type="file" accept="application/pdf,text/plain,.txt" />
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+          <button id="receipt-pick-btn" type="button" class="info">PDF auswählen</button>
+          <div id="receipt-picked-name" class="small muted2">Keine Datei gewählt</div>
+          <input id="receipt-file" type="file" accept=".pdf,application/pdf,text/plain,.txt" style="display:none" />
+        </div>
         <textarea id="receipt-text" class="input" style="min-height:140px; white-space:pre;" placeholder="Bon-Text hier einfügen…"></textarea>
       </div>
       <div class="small muted2" style="margin-top:8px;">
@@ -1492,7 +1564,7 @@ function openReceiptsHub(state, persist) {
       okText: "Vorschau",
       cancelText: "Abbrechen",
       onConfirm: async (m, close) => {
-        const file = m.querySelector("#receipt-file")?.files?.[0] || null;
+        const file = (m.__receiptFile || m.querySelector("#receipt-file")?.files?.[0] || null);
         const pasted = (m.querySelector("#receipt-text")?.value || "").trim();
 
         if (!file && !pasted) {
