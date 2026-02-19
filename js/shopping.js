@@ -15,7 +15,7 @@
 
 
   // ---- Bon / Beleg (0.4.0) ----
-  const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|r\.?\s*zahlung|rundung)/i;
+  const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|ec\b|bar\b|r\.?\s*zahlung|rundung)/i;
   const RECEIPT_PRICE_RE = /-?\d{1,3}(?:\.\d{3})*,\d{2}/g;
 
   function parseEuroStr(s) {
@@ -51,29 +51,11 @@
   }
 
   function parseReceiptItemsFromText(text) {
-    // Normalize raw text into lines.
-    // Some PDF extractors produce "one long line". We try to split merged lines using price-token heuristics.
-    const rawLines = String(text || "")
+    const lines = String(text || "")
       .replace(/\r/g, "\n")
       .split("\n")
-      .map((l) => String(l || "").trim())
+      .map((l) => l.trim())
       .filter(Boolean);
-
-    const lines = [];
-    for (const l of rawLines) {
-      const cleaned = String(l || "").replace(/\s{2,}/g, " ").trim();
-      if (!cleaned) continue;
-
-      const priceCount = (cleaned.match(RECEIPT_PRICE_RE) || []).length;
-
-      // If we see many prices in one line, it's very likely multiple receipt rows glued together.
-      if (priceCount >= 4 || (priceCount >= 3 && cleaned.length > 160)) {
-        const parts = splitMergedReceiptLine(cleaned);
-        for (const p of parts) lines.push(p);
-      } else {
-        lines.push(cleaned);
-      }
-    }
 
     const items = [];
     let started = false;
@@ -82,23 +64,19 @@
       const line = String(lineRaw || "").trim();
       if (!line) continue;
 
-      // Stop section (totals/payment/tax)
       if (started && RECEIPT_STOP_RE.test(line)) break;
-
-      // Extra stop heuristic for payment rows like "BAR 12,34" or "EC 12,34"
-      if (started && /(^|\s)(ec|bar)(\s|$)/i.test(line) && line.length <= 24) break;
 
       const matches = line.match(RECEIPT_PRICE_RE);
       if (!matches || matches.length === 0) continue;
 
-      // ignore headers etc.
-      if (/^tel\b|^kasse\b|^filiale\b/i.test(line)) continue;
-
-      started = true;
-
       const lastStr = matches[matches.length - 1];
       const lastIdx = line.lastIndexOf(lastStr);
       if (lastIdx < 0) continue;
+
+      // Heuristic: ignore lines that look like headers or phone numbers, etc.
+      if (/^tel\b|^kasse\b|^filiale\b/i.test(line)) continue;
+
+      started = true;
 
       const lineTotal = parseEuroStr(lastStr);
       if (!Number.isFinite(lineTotal)) continue;
@@ -112,41 +90,6 @@
         if (idx2 >= 0 && idx2 + secondLastStr.length >= namePart.length - 1) {
           namePart = namePart.slice(0, idx2).trim();
         }
-      }
-
-      let qty = 1;
-      const mQty = namePart.match(/^(\d+)\s*[xX]\s+(.+)$/);
-      if (mQty) {
-        qty = Math.max(1, Math.round(Number(mQty[1]) || 1));
-        namePart = String(mQty[2] || "").trim();
-      } else if (Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0) {
-        const ratio = lineTotal / unitPriceMaybe;
-        const r = Math.round(ratio);
-        if (Number.isFinite(ratio) && r > 0 && Math.abs(ratio - r) < 0.05) qty = r;
-      }
-
-      const unitPrice = Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0 ? unitPriceMaybe : (lineTotal / qty);
-      const rawName = namePart.replace(/\s{2,}/g, " ").trim();
-
-      const low = rawName.toLowerCase();
-      let kind = "item";
-      if (/pfand/.test(low)) kind = "pfand";
-      else if (/rabatt|coupon|gutschein|payback|aktion|bonus/.test(low)) kind = "discount";
-      else if (/mwst|ust/.test(low)) kind = "misc";
-
-      items.push({
-        id: uid(),
-        rawName: rawName || "(unbekannt)",
-        qty: Math.max(1, qty),
-        unitPrice: Math.round((Number(unitPrice) || 0) * 100) / 100,
-        lineTotal: Math.round((Number(lineTotal) || 0) * 100) / 100,
-        matchedIngredientId: null,
-        kind
-      });
-    }
-
-    return items;
-  }
       }
 
       let qty = 1;
@@ -1062,45 +1005,20 @@ modal.modal.addEventListener("change", (ev) => {
       const cur = getCurrentItem(r);
       if (!r || !cur) return;
 
+      cur.matchedIngredientId = ingredientId || null;
+      r.updatedAt = new Date().toISOString();
+
+      upsertPurchaseLogFromReceiptItem(state, r, cur);
+      persist();
+
+      // Edit modal (Preis/Haltbarkeit) und danach direkt weiter scannen
       const ing = getIng(state, ingredientId);
       if (!ing || !window.ingredients?.openIngredientModal) {
-        window.ui?.toast?.("Zutaten-Modal nicht verfügbar.");
+        currentItemId = findNextItemId(r);
         render();
         resumeScan();
         return;
       }
-
-      pauseScan();
-      stopCamera();
-
-      window.ingredients.openIngredientModal(state, persist, ing, {
-        noNavigate: true,
-        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
-        prefillBarcode: cleanBarcode(scannedCode),
-        prefillPrice: (() => {
-          const q = Math.max(1, Number(cur?.qty) || 1);
-          const u = Number(cur?.unitPrice);
-          const lt = Number(cur?.lineTotal);
-          const p = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(lt) && lt > 0) ? (lt / q) : 0);
-          return p ? (Math.round(p * 100) / 100) : "";
-        })(),
-        requirePrice: true,
-        onDone: (info) => {
-          const saved = !!info?.saved;
-          if (saved) {
-            cur.matchedIngredientId = ingredientId || null;
-            r.updatedAt = new Date().toISOString();
-            upsertPurchaseLogFromReceiptItem(state, r, cur);
-            persist();
-            currentItemId = findNextItemId(getReceipt() || r);
-          } else {
-            cur.matchedIngredientId = null;
-          }
-          render();
-          startCamera();
-        }
-      });
-    }
 
       pauseScan();
       stopCamera();
@@ -1150,37 +1068,6 @@ modal.modal.addEventListener("change", (ev) => {
         startCamera();
         return;
       }
-
-      window.ingredients.openIngredientModal(state, persist, null, {
-        noNavigate: true,
-        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
-        prefillBarcode: scannedCode,
-        prefillName: (off?.name || cur.rawName || "").trim(),
-        prefillAmount: qty?.amount || 1,
-        prefillUnit: qty?.unit || "Stück",
-        prefillPrice: prefillPrice,
-        requirePrice: true,
-        prefillNutriments: off?.nutriments || null,
-        onDone: (info) => {
-          const saved = !!info?.saved;
-          const newIng = info?.ingredient || null;
-
-          if (saved && newIng?.id) {
-            const rr = getReceipt() || r;
-            const item = (rr?.items || []).find((x) => x && x.id === currentItemId) || cur;
-            if (rr && item && !item.matchedIngredientId) {
-              item.matchedIngredientId = newIng.id;
-              rr.updatedAt = new Date().toISOString();
-              upsertPurchaseLogFromReceiptItem(state, rr, item);
-              persist();
-            }
-            currentItemId = findNextItemId(getReceipt() || rr);
-          }
-          render();
-          startCamera();
-        }
-      });
-    }
 
       window.ingredients.openIngredientModal(state, persist, null, {
         noNavigate: true,
@@ -1533,32 +1420,23 @@ modal.modal.addEventListener("change", (ev) => {
       });
     }
 
-    async function assignReceiptItemAndEdit(r, itemId, ingredientId, scannedCode = "") {
+    async function assignReceiptItemAndEdit(r, itemId, ingredientId) {
       const item = pickReceiptItemById(r, itemId);
       if (!r || !item) return;
+      item.matchedIngredientId = ingredientId || null;
+      r.updatedAt = new Date().toISOString();
+      upsertPurchaseLogFromReceiptItem(state, r, item);
+      persist();
 
       const ing = getIng(state, ingredientId);
-      if (!ing) {
-        resumeScan();
-        return;
-      }
-
       await editIngredientThenResume(ing, {
-        prefillBarcode: cleanBarcode(scannedCode),
         prefillPrice: (() => {
           const q = Math.max(1, Number(item?.qty) || 1);
           const u = Number(item?.unitPrice);
           const lt = Number(item?.lineTotal);
           const p = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(lt) && lt > 0) ? (lt / q) : 0);
           return p ? (Math.round(p * 100) / 100) : "";
-        })(),
-        onDone: (info) => {
-          if (!info?.saved) return;
-          item.matchedIngredientId = ingredientId || null;
-          r.updatedAt = new Date().toISOString();
-          upsertPurchaseLogFromReceiptItem(state, r, item);
-          persist();
-        }
+        })()
       });
     }
 
@@ -1656,7 +1534,7 @@ modal.modal.addEventListener("change", (ev) => {
         if (sug[0] && isGoodAutoMatch(sug[0], sug[1])) {
           msgEl.textContent = `Zuordnung (auto): ${sug[0].it.rawName} · Barcode: ${code}`;
           resultEl.innerHTML = `<div class="small muted2">Zuordnung…</div>`;
-          await assignReceiptItemAndEdit(r, sug[0].it.id, ing.id, code);
+          await assignReceiptItemAndEdit(r, sug[0].it.id, ing.id);
           return;
         }
 
@@ -1777,7 +1655,7 @@ modal.modal.addEventListener("change", (ev) => {
         const itemId = btn.getAttribute("data-item-id");
         const ingId = btn.getAttribute("data-ingredient-id");
         resultEl.innerHTML = `<div class="small muted2">Zuordnung…</div>`;
-        await assignReceiptItemAndEdit(r, itemId, ingId, lastCode);
+        await assignReceiptItemAndEdit(r, itemId, ingId);
         return;
       }
 
