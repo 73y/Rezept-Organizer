@@ -1104,6 +1104,22 @@ modal.modal.addEventListener("change", (ev) => {
         return;
       }
 
+      const persistCurrentItemAssignment = (ingredientId) => {
+        const id = ingredientId ? String(ingredientId) : "";
+        if (!id) return false;
+        const rr = getReceipt() || r;
+        const item = (rr?.items || []).find((x) => x && x.id === cur.id) || null;
+        if (!rr || !item) return false;
+
+        if (String(item.matchedIngredientId || "") === id) return true;
+
+        item.matchedIngredientId = id;
+        rr.updatedAt = new Date().toISOString();
+        upsertPurchaseLogFromReceiptItem(state, rr, item);
+        persist();
+        return true;
+      };
+
       window.ingredients.openIngredientModal(state, persist, null, {
         noNavigate: true,
         baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
@@ -1116,28 +1132,12 @@ modal.modal.addEventListener("change", (ev) => {
         prefillNutriments: off?.nutriments || null,
         onSaved: (newIng) => {
           try {
-            const rr = getReceipt() || r;
-            const item = (rr.items || []).find((x) => x && x.id === cur.id) || null;
-            if (rr && item && newIng?.id) {
-              item.matchedIngredientId = newIng.id;
-              rr.updatedAt = new Date().toISOString();
-              upsertPurchaseLogFromReceiptItem(state, rr, item);
-              persist();
-            }
+            persistCurrentItemAssignment(newIng?.id);
           } catch {}
         },
         onDone: (info) => {
           const saved = !!info?.saved;
-          if (saved && info?.ingredient?.id) {
-            const rr = getReceipt() || r;
-            const item = (rr.items || []).find((x) => x && x.id === cur.id) || null;
-            if (item && String(item.matchedIngredientId || "") !== String(info.ingredient.id)) {
-              item.matchedIngredientId = info.ingredient.id;
-              rr.updatedAt = new Date().toISOString();
-              upsertPurchaseLogFromReceiptItem(state, rr, item);
-              persist();
-            }
-          }
+          if (saved) persistCurrentItemAssignment(info?.ingredient?.id);
           currentItemId = saved ? findNextItemId(getReceipt() || r) : cur.id;
           render();
           startCamera();
