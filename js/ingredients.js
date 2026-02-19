@@ -277,8 +277,8 @@
       <div class="modal-body">${contentHTML}</div>
 
       <div class="modal-footer">
-        <button type="button" data-action="cancel">${esc(cancelText)}</button>
-        <button type="button" data-action="ok" class="${esc(okClass)}">${esc(okText)}</button>
+        <button data-action="cancel">${esc(cancelText)}</button>
+        <button data-action="ok" class="${esc(okClass)}">${esc(okText)}</button>
       </div>
     `;
 
@@ -327,8 +327,6 @@
 modal.addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-action]");
       if (!btn) return;
-      e.preventDefault();
-      e.stopPropagation();
       const action = btn.getAttribute("data-action");
       if (action === "close" || action === "cancel") {
         onCancel?.(modal, close);
