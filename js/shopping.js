@@ -15,7 +15,12 @@
 
 
   // ---- Bon / Beleg (0.4.0) ----
-  const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|ec\b|bar\b|r\.?\s*zahlung|rundung)/i;
+  
+  // ---- Bon / Beleg (0.4.0) ----
+  // NOTE: do NOT stop on bare "EC"/"BAR" via generic stop-regex,
+  // because product names can contain "bar" (e.g. Protein Bar).
+  // Payment stop-lines are handled separately with stricter heuristics.
+  const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|r\.?\s*zahlung|rundung)/i;
   const RECEIPT_PRICE_RE = /-?\d{1,3}(?:\.\d{3})*,\d{2}/g;
 
   function parseEuroStr(s) {
@@ -50,12 +55,63 @@
     return { store, at };
   }
 
+  function splitMergedReceiptLine(line) {
+    // Split "one long line" receipts into pseudo-lines.
+    // Heuristic: cut after a price token if the following chunk starts with letters (next item).
+    const s = String(line || "").replace(/\s{2,}/g, " ").trim();
+    if (!s) return [];
+
+    const matches = [...s.matchAll(RECEIPT_PRICE_RE)];
+    if (matches.length <= 2) return [s];
+
+    const parts = [];
+    let lastCut = 0;
+
+    for (let i = 0; i < matches.length; i++) {
+      const m = matches[i];
+      const end = (m.index ?? 0) + m[0].length;
+      const after = s.slice(end);
+
+      // Next chunk begins with a letter -> likely next item starts here
+      if (/^\s+[A-Za-zÄÖÜäöü]/.test(after)) {
+        const chunk = s.slice(lastCut, end).trim();
+        if (chunk && /[A-Za-zÄÖÜäöü]/.test(chunk)) {
+          parts.push(chunk);
+          lastCut = end;
+        }
+      }
+    }
+
+    const tail = s.slice(lastCut).trim();
+    if (tail) parts.push(tail);
+
+    return parts.length ? parts : [s];
+  }
+
   function parseReceiptItemsFromText(text) {
-    const lines = String(text || "")
+    // Normalize raw text into lines.
+    // Some PDF extractors produce "one long line" -> we split it using price-token heuristics.
+    const rawLines = String(text || "")
       .replace(/\r/g, "\n")
       .split("\n")
-      .map((l) => l.trim())
+      .map((l) => String(l || "").trim())
       .filter(Boolean);
+
+    const lines = [];
+    for (const l of rawLines) {
+      const cleaned = String(l || "").replace(/\s{2,}/g, " ").trim();
+      if (!cleaned) continue;
+
+      const priceCount = (cleaned.match(RECEIPT_PRICE_RE) || []).length;
+
+      // If we see many prices in one "line", it's almost certainly multiple receipt rows glued together.
+      if (priceCount >= 4 || (priceCount >= 3 && cleaned.length > 160)) {
+        const parts = splitMergedReceiptLine(cleaned);
+        for (const p of parts) lines.push(p);
+      } else {
+        lines.push(cleaned);
+      }
+    }
 
     const items = [];
     let started = false;
@@ -64,7 +120,11 @@
       const line = String(lineRaw || "").trim();
       if (!line) continue;
 
+      // Stop section (totals/payment/tax)
       if (started && RECEIPT_STOP_RE.test(line)) break;
+
+      // Extra stop heuristic for payment rows like "BAR 12,34" or "EC 12,34"
+      if (started && /(^|\s)(ec|bar)(\s|$)/i.test(line) && line.length <= 24) break;
 
       const matches = line.match(RECEIPT_PRICE_RE);
       if (!matches || matches.length === 0) continue;
@@ -73,7 +133,7 @@
       const lastIdx = line.lastIndexOf(lastStr);
       if (lastIdx < 0) continue;
 
-      // Heuristic: ignore lines that look like headers or phone numbers, etc.
+      // Heuristic: ignore lines that look like headers
       if (/^tel\b|^kasse\b|^filiale\b/i.test(line)) continue;
 
       started = true;
@@ -104,10 +164,8 @@
       }
 
       const unitPrice = Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0 ? unitPriceMaybe : (lineTotal / qty);
-
       const rawName = namePart.replace(/\s{2,}/g, " ").trim();
 
-      // classify
       const low = rawName.toLowerCase();
       let kind = "item";
       if (/pfand/.test(low)) kind = "pfand";
