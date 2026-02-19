@@ -847,7 +847,13 @@ modal.modal.addEventListener("change", (ev) => {
   function openReceiptGuidedScanModal(state, persist, receiptId, opts = {}) {
     const onFinish = typeof opts.onFinish === "function" ? opts.onFinish : null;
 
-    const getReceipt = () => (state.receipts || []).find((r) => r && r.id === receiptId) || null;
+    const syncState = () => {
+      const latest = window.app?.getState?.();
+      if (latest && typeof latest === "object") state = latest;
+      return state;
+    };
+
+    const getReceipt = () => (syncState().receipts || []).find((r) => r && r.id === receiptId) || null;
 
     const findNextItemId = (r) => {
       const items = Array.isArray(r?.items) ? r.items : [];
@@ -1032,15 +1038,14 @@ modal.modal.addEventListener("change", (ev) => {
       const cur = getCurrentItem(r);
       if (!r || !cur) return;
 
-      cur.matchedIngredientId = ingredientId || null;
-      r.updatedAt = new Date().toISOString();
-
-      upsertPurchaseLogFromReceiptItem(state, r, cur);
-      persist();
-
       // Edit modal (Preis/Haltbarkeit) und danach direkt weiter scannen
-      const ing = getIng(state, ingredientId);
+      const ing = getIng(syncState(), ingredientId);
       if (!ing || !window.ingredients?.openIngredientModal) {
+        cur.matchedIngredientId = ingredientId || null;
+        r.updatedAt = new Date().toISOString();
+        upsertPurchaseLogFromReceiptItem(state, r, cur);
+        persist();
+        syncState();
         currentItemId = findNextItemId(r);
         render();
         resumeScan();
@@ -1063,8 +1068,19 @@ modal.modal.addEventListener("change", (ev) => {
           return p ? (Math.round(p * 100) / 100) : "";
         })(),
         requirePrice: true,
-        onDone: () => {
-          currentItemId = findNextItemId(getReceipt() || r);
+        onSaved: () => {
+          const rr = getReceipt() || r;
+          const item = (rr.items || []).find((x) => x && x.id === cur.id) || null;
+          if (!item) return;
+          item.matchedIngredientId = ingredientId || null;
+          rr.updatedAt = new Date().toISOString();
+          upsertPurchaseLogFromReceiptItem(state, rr, item);
+          persist();
+        syncState();
+        },
+        onDone: (info) => {
+          const saved = !!info?.saved;
+          currentItemId = saved ? findNextItemId(getReceipt() || r) : cur.id;
           render();
           startCamera();
         }
@@ -1096,6 +1112,23 @@ modal.modal.addEventListener("change", (ev) => {
         return;
       }
 
+      const persistCurrentItemAssignment = (ingredientId) => {
+        const id = ingredientId ? String(ingredientId) : "";
+        if (!id) return false;
+        const rr = getReceipt() || r;
+        const item = (rr?.items || []).find((x) => x && x.id === cur.id) || null;
+        if (!rr || !item) return false;
+
+        if (String(item.matchedIngredientId || "") === id) return true;
+
+        item.matchedIngredientId = id;
+        rr.updatedAt = new Date().toISOString();
+        upsertPurchaseLogFromReceiptItem(state, rr, item);
+        persist();
+        syncState();
+        return true;
+      };
+
       window.ingredients.openIngredientModal(state, persist, null, {
         noNavigate: true,
         baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
@@ -1108,18 +1141,13 @@ modal.modal.addEventListener("change", (ev) => {
         prefillNutriments: off?.nutriments || null,
         onSaved: (newIng) => {
           try {
-            const rr = getReceipt();
-            const item = (rr?.items || []).find((x) => x && x.id === currentItemId) || null;
-            if (rr && item && !item.matchedIngredientId && newIng?.id) {
-              item.matchedIngredientId = newIng.id;
-              rr.updatedAt = new Date().toISOString();
-              upsertPurchaseLogFromReceiptItem(state, rr, item);
-              persist();
-            }
+            persistCurrentItemAssignment(newIng?.id);
           } catch {}
         },
-        onDone: () => {
-          currentItemId = findNextItemId(getReceipt() || r);
+        onDone: (info) => {
+          const saved = !!info?.saved;
+          if (saved) persistCurrentItemAssignment(info?.ingredient?.id);
+          currentItemId = saved ? findNextItemId(getReceipt() || r) : cur.id;
           render();
           startCamera();
         }
@@ -1136,7 +1164,7 @@ modal.modal.addEventListener("change", (ev) => {
 
       pauseScan();
 
-      const ingByBarcode = findIngredientByBarcode(state, code);
+      const ingByBarcode = findIngredientByBarcode(syncState(), code);
       if (ingByBarcode) {
         const score = nameSimilarity(cur.rawName || "", ingByBarcode.name || "");
         const OK = 0.35;
@@ -1165,7 +1193,7 @@ modal.modal.addEventListener("change", (ev) => {
         return;
       }
 
-      const sug = suggestIngredientsByName(state, cur.rawName || "", 3);
+      const sug = suggestIngredientsByName(syncState(), cur.rawName || "", 3);
       const sugRows = sug.length
         ? sug.map((x) => `
             <button data-action="assignIng" data-ingredient-id="${esc(x.ing.id)}" data-code="${esc(code)}" style="text-align:left;">
@@ -1238,6 +1266,10 @@ modal.modal.addEventListener("change", (ev) => {
         return;
       }
     });
+
+    render();
+    startCamera();
+  }
 
     
 
@@ -1735,11 +1767,6 @@ modal.modal.addEventListener("change", (ev) => {
     });
 
     renderHeader();
-    startCamera();
-  }
-
-// initial
-    render();
     startCamera();
   }
 
