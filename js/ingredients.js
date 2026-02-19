@@ -849,7 +849,8 @@
           <select id="i-cat" style="width:100%;">
             ${categorySelectOptionsHTML(state, catSel)}
           </select>
-          <div style="margin-top:8px;">
+          <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+            <button type="button" class="info" data-action="catQuickAdd">+ Neue Kategorie</button>
             <button type="button" class="info" data-action="manageCats">Kategorien…</button>
           </div>
         </div>
@@ -1038,6 +1039,61 @@
         return;
       }
 
+
+
+      // Kategorie schnell anlegen (für Scan-Flow)
+      if (a === "catQuickAdd") {
+        const content = `
+          <div class="small muted2">Neue Zutaten-Kategorie anlegen. Danach bist du wieder im Bearbeiten-Fenster.</div>
+          <div style="margin-top:12px;">
+            <label class="small">Name</label><br/>
+            <input id="cat-q-name" placeholder="z. B. Gemüse" />
+          </div>
+          <div class="small" id="cat-q-msg" style="margin-top:10px; color: rgba(239,68,68,0.9);"></div>
+        `;
+
+        buildModal({
+          title: "Neue Kategorie",
+          contentHTML: content,
+          okText: "Anlegen",
+          okClass: "success",
+          cancelText: "Abbrechen",
+          onConfirm: (m, close) => {
+            const msg = m.querySelector("#cat-q-msg");
+            if (msg) msg.textContent = "";
+
+            const name = String(m.querySelector("#cat-q-name")?.value || "").trim();
+            if (!name) {
+              if (msg) msg.textContent = "Bitte einen Namen eingeben.";
+              return;
+            }
+
+            if (!Array.isArray(state.ingredientCategories)) state.ingredientCategories = [];
+            const dup = state.ingredientCategories.some((c) => String(c?.name || "").trim().toLowerCase() === name.toLowerCase());
+            if (dup) {
+              if (msg) msg.textContent = "Kategorie existiert schon.";
+              return;
+            }
+
+            const id = uid();
+            state.ingredientCategories.push({ id, name });
+            // alphabetisch halten
+            state.ingredientCategories.sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
+
+            persist();
+            close();
+
+            // im Zutat-Modal direkt auswählen
+            const sel = modal.querySelector("#i-cat");
+            if (sel) {
+              sel.innerHTML = categorySelectOptionsHTML(state, id);
+              sel.value = String(id);
+            }
+          }
+        });
+
+        return;
+      }
       // Kategorien verwalten
       if (a === "manageCats") {
         openIngredientCategoriesModal(state, persist, {
