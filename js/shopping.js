@@ -503,7 +503,14 @@ modal.modal.addEventListener("change", (ev) => {
               window.ui?.toast?.("Bitte Name eingeben.");
               return;
             }
-            const newIng = { id: uid(), name, barcode: "", amount: 1, unit: "Stück", price: 0, shelfLifeDays: 0 };
+            const unitPrice = (() => {
+              const u = Number(it?.unitPrice);
+              const q = Math.max(1, Number(it?.qty) || 1);
+              const lt = Number(it?.lineTotal);
+              const p = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(lt) && lt > 0) ? (lt / q) : 0);
+              return p ? (Math.round(p * 100) / 100) : 0;
+            })();
+            const newIng = { id: uid(), name, barcode: "", amount: 1, unit: "Stück", price: unitPrice, shelfLifeDays: 0 };
             state.ingredients.push(newIng);
             persist();
             close2();
@@ -906,6 +913,7 @@ modal.modal.addEventListener("change", (ev) => {
 
       window.ingredients.openIngredientModal(state, persist, ing, {
         noNavigate: true,
+        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.createdAt || "") : ""),
         onDone: () => {
           currentItemId = findNextItemId(getReceipt() || r);
           render();
@@ -922,6 +930,14 @@ modal.modal.addEventListener("change", (ev) => {
       const off = await fetchOffSuggestion(state, persist, scannedCode);
       const qty = off?.amount && off?.unit ? { amount: off.amount, unit: off.unit } : null;
 
+      const prefillPrice = (() => {
+        const q = Math.max(1, Number(cur?.qty) || 1);
+        const u = Number(cur?.unitPrice);
+        const lt = Number(cur?.lineTotal);
+        const p = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(lt) && lt > 0) ? (lt / q) : 0);
+        return p ? (Math.round(p * 100) / 100) : "";
+      })();
+
       pauseScan();
       stopCamera();
 
@@ -933,10 +949,12 @@ modal.modal.addEventListener("change", (ev) => {
 
       window.ingredients.openIngredientModal(state, persist, null, {
         noNavigate: true,
+        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.createdAt || "") : ""),
         prefillBarcode: scannedCode,
         prefillName: (off?.name || cur.rawName || "").trim(),
         prefillAmount: qty?.amount || 1,
         prefillUnit: qty?.unit || "Stück",
+        prefillPrice: prefillPrice,
         prefillNutriments: off?.nutriments || null,
         onSaved: (newIng) => {
           try {
@@ -978,7 +996,8 @@ modal.modal.addEventListener("change", (ev) => {
           resultEl.innerHTML = `
             <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
               <div style="font-weight:800;">Erkannt: ${esc(ingByBarcode.name || "")}</div>
-              <div class="small muted2" style="margin-top:4px;">Das passt evtl. nicht zu „${esc(cur.rawName || "")}“. Trotzdem zuordnen?</div>
+              <div class="small muted2" style="margin-top:4px;">Barcode: <b>${esc(code)}</b></div>
+<div class="small muted2" style="margin-top:4px;">Das passt evtl. nicht zu „${esc(cur.rawName || "")}“. Trotzdem zuordnen?</div>
               <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
                 <button class="primary" data-action="assignIng" data-ingredient-id="${esc(ingByBarcode.id)}" data-code="${esc(code)}">Trotzdem zuordnen</button>
                 <button data-action="resume">Weiter scannen</button>
@@ -990,7 +1009,8 @@ modal.modal.addEventListener("change", (ev) => {
         }
 
         // Auto-assign + edit
-        resultEl.innerHTML = `<div class="small muted2">Zuordnung: ${esc(ingByBarcode.name || "")} …</div>`;
+        resultEl.innerHTML = `<div class="small muted2">Zuordnung: ${esc(ingByBarcode.name || "")} · Barcode: <b>${esc(code)}</b> …</div>`;
+        msgEl.textContent = `Zuordnung: ${ingByBarcode.name || ""} · Barcode: ${code}`;
         await assignAndEdit(ingByBarcode.id, code);
         return;
       }
@@ -1007,7 +1027,8 @@ modal.modal.addEventListener("change", (ev) => {
       resultEl.innerHTML = `
         <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
           <div style="font-weight:800;">Unbekannter Barcode</div>
-          <div class="small muted2" style="margin-top:4px;">Wähle eine passende Zutat oder lege eine neue an.</div>
+          <div class="small muted2" style="margin-top:4px;">Barcode: <b>${esc(code)}</b></div>
+<div class="small muted2" style="margin-top:4px;">Wähle eine passende Zutat oder lege eine neue an.</div>
           <div style="display:grid; gap:8px; margin-top:10px;">${sugRows}</div>
           <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:12px;">
             <button class="success" data-action="newIng" data-code="${esc(code)}">+ Neue Zutat aus Barcode</button>
@@ -1259,6 +1280,7 @@ modal.modal.addEventListener("change", (ev) => {
       stopCamera();
       window.ingredients.openIngredientModal(state, persist, ing, {
         noNavigate: true,
+        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.createdAt || "") : ""),
         onDone: () => {
           renderHeader();
           startCamera();
@@ -1278,7 +1300,7 @@ modal.modal.addEventListener("change", (ev) => {
       await editIngredientThenResume(ing);
     }
 
-    async function createIngredientFlow({ code, prefillName, prefillAmount, prefillUnit, prefillNutriments, onCreated }) {
+    async function createIngredientFlow({ code, prefillName, prefillAmount, prefillUnit, prefillPrice, prefillNutriments, onCreated }) {
       if (!window.ingredients?.openIngredientModal) {
         window.ui?.toast?.("Zutaten-Modal nicht verfügbar.");
         resumeScan();
@@ -1288,10 +1310,12 @@ modal.modal.addEventListener("change", (ev) => {
       stopCamera();
       window.ingredients.openIngredientModal(state, persist, null, {
         noNavigate: true,
+        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.createdAt || "") : ""),
         prefillBarcode: code,
         prefillName: prefillName || "",
         prefillAmount: prefillAmount || 1,
         prefillUnit: prefillUnit || "Stück",
+        prefillPrice: (prefillPrice ?? ""),
         prefillNutriments: prefillNutriments || null,
         onSaved: (newIng) => {
           try { onCreated?.(newIng); } catch {}
@@ -1303,11 +1327,12 @@ modal.modal.addEventListener("change", (ev) => {
       });
     }
 
-    function renderPickList({ title, subtitle, picksHTML, extraHTML }) {
+    function renderPickList({ title, subtitle, barcode, picksHTML, extraHTML }) {
       resultEl.innerHTML = `
         <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
           <div style="font-weight:800;">${esc(title || "Auswahl")}</div>
           ${subtitle ? `<div class="small muted2" style="margin-top:4px;">${esc(subtitle)}</div>` : ``}
+          ${barcode ? `<div class="small muted2" style="margin-top:6px;">Barcode: <b>${esc(barcode)}</b></div>` : ``}
           <div style="display:grid; gap:8px; margin-top:10px;">${picksHTML || ""}</div>
           ${extraHTML ? `<div style="margin-top:12px;">${extraHTML}</div>` : ``}
         </div>
@@ -1339,6 +1364,7 @@ modal.modal.addEventListener("change", (ev) => {
           renderPickList({
             title: `Erkannt: ${ing.name || "Zutat"}`,
             subtitle: "Bon ist fertig – das Produkt ist vermutlich extra / nicht auf dem Bon.",
+            barcode: code,
             picksHTML: "",
             extraHTML: `
               <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
@@ -1365,7 +1391,7 @@ modal.modal.addEventListener("change", (ev) => {
 
         // Auto, wenn sehr sicher
         if (sug[0] && isGoodAutoMatch(sug[0], sug[1])) {
-          msgEl.textContent = `Zuordnung (auto): ${sug[0].it.rawName}`;
+          msgEl.textContent = `Zuordnung (auto): ${sug[0].it.rawName} · Barcode: ${code}`;
           resultEl.innerHTML = `<div class="small muted2">Zuordnung…</div>`;
           await assignReceiptItemAndEdit(r, sug[0].it.id, ing.id);
           return;
@@ -1374,6 +1400,7 @@ modal.modal.addEventListener("change", (ev) => {
         renderPickList({
           title: `Erkannt: ${ing.name || "Zutat"}`,
           subtitle: "Welcher Bon-Artikel passt dazu? (Top 3)",
+          barcode: code,
           picksHTML: picks || `<div class="small muted2">Keine offenen Bon-Artikel.</div>`,
           extraHTML: `
             <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
@@ -1396,6 +1423,7 @@ modal.modal.addEventListener("change", (ev) => {
         renderPickList({
           title: offName ? `Unbekannt: ${offName}` : "Unbekannter Barcode",
           subtitle: "Bon ist fertig – du kannst das Produkt trotzdem als Zutat anlegen.",
+          barcode: code,
           picksHTML: "",
           extraHTML: `
             <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
@@ -1423,6 +1451,7 @@ modal.modal.addEventListener("change", (ev) => {
       renderPickList({
         title: offName ? `Unbekannt: ${offName}` : "Unbekannter Barcode",
         subtitle: "Wähle den passenden Bon-Artikel (Top 3) oder lege das Produkt als extra an.",
+        barcode: code,
         picksHTML: picks || `<div class="small muted2">Keine offenen Bon-Artikel.</div>`,
         extraHTML: `
           <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
@@ -1499,6 +1528,14 @@ modal.modal.addEventListener("change", (ev) => {
           prefillName: (off?.name || "").trim(),
           prefillAmount: qty?.amount || 1,
           prefillUnit: qty?.unit || "Stück",
+          prefillPrice: (() => {
+            const item = pickReceiptItemById(r, itemId);
+            const q = Math.max(1, Number(item?.qty) || 1);
+            const u = Number(item?.unitPrice);
+            const lt = Number(item?.lineTotal);
+            const p = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(lt) && lt > 0) ? (lt / q) : 0);
+            return p ? (Math.round(p * 100) / 100) : "";
+          })(),
           prefillNutriments: off?.nutriments || null,
           onCreated: (newIng) => {
             if (!newIng?.id) return;
@@ -2214,7 +2251,8 @@ function openReceiptsHub(state, persist) {
       if (!ing) {
         result.innerHTML = `
           <div style="font-weight:750;">Unbekannter Barcode</div>
-          <div class="small muted2" style="margin-top:6px;">Diese Zutat ist noch nicht in deinen Zutaten gespeichert.</div>
+                    <div class="small muted2" style="margin-top:6px;">Barcode: <b>${esc(lastCode || "")}</b></div>
+<div class="small muted2" style="margin-top:6px;">Diese Zutat ist noch nicht in deinen Zutaten gespeichert.</div>
           <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
             <button class="info" data-action="goIngredients">Zu Zutaten</button>
           </div>
@@ -2229,7 +2267,8 @@ function openReceiptsHub(state, persist) {
       if (!onList) {
         result.innerHTML = `
           <div style="font-weight:800; line-height:1.2;">${esc(ing.name)}</div>
-          <div class="small muted2" style="margin-top:6px;">Nicht auf der Einkaufsliste.</div>
+                    <div class="small muted2" style="margin-top:6px;">Barcode: <b>${esc(lastCode || "")}</b></div>
+<div class="small muted2" style="margin-top:6px;">Nicht auf der Einkaufsliste.</div>
           <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
             <button class="info" data-action="addToList" data-ingredient-id="${esc(String(currentIngredientId))}">Zur Liste hinzufügen (+1)</button>
           </div>
@@ -2243,6 +2282,7 @@ function openReceiptsHub(state, persist) {
           <div style="min-width:0; flex:1;">
             <div style="font-weight:800; line-height:1.2;">${esc(ing.name)}</div>
             <div class="small muted2" style="margin-top:6px;">Packung: <b>${esc(packLabel)}</b></div>
+            <div class="small muted2" style="margin-top:4px;">Barcode: <b>${esc(lastCode || "")}</b></div>
             <div class="small" style="margin-top:8px;">Gekauft: <b>${bought}/${req || 0}</b> ${done ? "✓" : ""}</div>
           </div>
           ${done ? `<span class="pill exp-green">Fertig</span>` : ``}

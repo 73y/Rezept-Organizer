@@ -29,6 +29,71 @@
   };
 
 
+  const pad2 = (n) => String(n).padStart(2, "0");
+
+  function formatDDMMYYFromUTC(utcMs) {
+    const d = new Date(utcMs);
+    const dd = pad2(d.getUTCDate());
+    const mm = pad2(d.getUTCMonth() + 1);
+    const yy = pad2(d.getUTCFullYear() % 100);
+    return `${dd}.${mm}.${yy}`;
+  }
+
+  // Input: "12.03" / "12.03.26" / "12.03.2027"  -> days between baseDate (date-only) and best-before date
+  function parseBestBeforeInput(raw, baseDate) {
+    const s0 = String(raw ?? "").trim();
+    if (!s0) return { ok: false, empty: true };
+
+    const cleaned = s0
+      .replace(/\s+/g, "")
+      .replace(/[\/\-]/g, ".")
+      .replace(/\.+$/g, "");
+
+    const parts = cleaned.split(".").filter(Boolean);
+    if (parts.length < 2 || parts.length > 3) return { ok: false };
+
+    const dd = Number(parts[0]);
+    const mm = Number(parts[1]);
+    if (!Number.isInteger(dd) || !Number.isInteger(mm) || dd < 1 || dd > 31 || mm < 1 || mm > 12) return { ok: false };
+
+    const base = (baseDate instanceof Date && Number.isFinite(baseDate.getTime())) ? baseDate : new Date();
+    const baseUTC = Date.UTC(base.getFullYear(), base.getMonth(), base.getDate());
+
+    const yearProvided = parts.length === 3;
+    let yyyy;
+    if (yearProvided) {
+      const y = Number(parts[2]);
+      if (!Number.isInteger(y)) return { ok: false };
+      yyyy = (y < 100) ? (2000 + y) : y;
+    } else {
+      yyyy = base.getFullYear();
+    }
+
+    const makeUTC = (Y) => Date.UTC(Y, mm - 1, dd);
+
+    let expUTC = makeUTC(yyyy);
+    // Validate date existence (e.g. 31.02 invalid)
+    {
+      const d = new Date(expUTC);
+      if (d.getUTCFullYear() !== yyyy || d.getUTCMonth() !== (mm - 1) || d.getUTCDate() !== dd) return { ok: false };
+    }
+
+    // If user did not provide a year and date is before baseDate -> assume next year
+    if (!yearProvided && expUTC < baseUTC) {
+      expUTC = makeUTC(yyyy + 1);
+      const d2 = new Date(expUTC);
+      if (d2.getUTCFullYear() !== (yyyy + 1) || d2.getUTCMonth() !== (mm - 1) || d2.getUTCDate() !== dd) return { ok: false };
+      yyyy = yyyy + 1;
+    }
+
+    const days = Math.max(0, Math.round((expUTC - baseUTC) / 86400000));
+    const normalized = `${pad2(dd)}.${pad2(mm)}.${pad2(yyyy % 100)}`;
+
+    return { ok: true, expUTC, days, normalized, yearProvided };
+  }
+
+
+
 
   // Open Food Facts Autofill (Barcode -> Name/Packung)
   const OFF_FIELDS = "product_name,product_name_de,quantity,product_quantity,product_quantity_unit,brands,nutriments";
@@ -228,7 +293,38 @@
       if (e.target === overlay) close();
     });
 
-    modal.addEventListener("click", (e) => {
+    
+
+    // Haltbarkeit: Datum -> Tage (Basis: baseDate)
+    const shelfDateEl = modal.querySelector("#i-shelf-date");
+    const shelfInfoEl = modal.querySelector("#i-shelf-info");
+    const updateShelfInfo = () => {
+      if (!shelfDateEl || !shelfInfoEl) return;
+      const raw = (shelfDateEl.value || "").trim();
+      if (!raw) {
+        shelfInfoEl.textContent = "";
+        return;
+      }
+      const p = parseBestBeforeInput(raw, baseDate);
+      if (!p?.ok) {
+        shelfInfoEl.textContent = "Bitte Datum als TT.MM oder TT.MM.JJ eingeben.";
+        return;
+      }
+      shelfInfoEl.textContent = `${p.days} Tag(e) haltbar`;
+    };
+
+    if (shelfDateEl) {
+      shelfDateEl.addEventListener("input", updateShelfInfo);
+      shelfDateEl.addEventListener("blur", () => {
+        const raw = (shelfDateEl.value || "").trim();
+        if (!raw) return updateShelfInfo();
+        const p = parseBestBeforeInput(raw, baseDate);
+        if (p?.ok) shelfDateEl.value = p.normalized;
+        updateShelfInfo();
+      });
+      updateShelfInfo();
+    }
+modal.addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-action]");
       if (!btn) return;
       const action = btn.getAttribute("data-action");
@@ -825,6 +921,28 @@
     const catSel = String(ingOrNull?.categoryId || "");
     const unlistedDefault = !!ingOrNull?.unlisted;
 
+
+    const baseDate = (() => {
+      const raw = String(opts?.baseDateISO ?? "").trim();
+      const d = raw ? new Date(raw) : new Date();
+      return Number.isFinite(d.getTime()) ? d : new Date();
+    })();
+
+    const shelfDateValue = (() => {
+      const pre = String(opts?.prefillShelfDate ?? "").trim();
+      if (!isEdit && pre) return pre;
+
+      const daysRaw = isEdit ? (ingOrNull?.shelfLifeDays ?? "") : (opts?.prefillShelfLifeDays ?? "");
+      const days = Number(daysRaw);
+      if (Number.isFinite(days) && days > 0) {
+        const baseUTC = Date.UTC(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate());
+        const expUTC = baseUTC + Math.round(days) * 86400000;
+        return formatDDMMYYFromUTC(expUTC);
+      }
+      return "";
+    })();
+
+
     const unitOption = (value, label) =>
       `<option value="${esc(value)}" ${unitNorm === value ? "selected" : ""}>${esc(label)}</option>`;
 
@@ -876,12 +994,12 @@
       <div class="row" style="margin-top:10px;">
         <div>
           <label class="small">Preis pro Packung (€)</label><br/>
-          <input id="i-price" type="number" min="0" step="0.01" placeholder="z. B. 2,99" value="${esc(ingOrNull?.price ?? "")}" />
+          <input id="i-price" type="number" min="0" step="0.01" placeholder="z. B. 2,99" value="${esc(isEdit ? (ingOrNull?.price ?? "") : (opts?.prefillPrice ?? ""))}" />
         </div>
         <div>
-          <label class="small">Haltbarkeit (Tage)</label><br/>
-          <input id="i-shelf" type="number" min="0" step="1" placeholder="z. B. 7" value="${esc(ingOrNull?.shelfLifeDays ?? "")}" />
-          <div class="small muted2" style="margin-top:6px;">Wird genutzt für Ablaufdatum beim Einkauf.</div>
+          <label class="small">Haltbarkeit (Datum)</label><br/>
+          <input id="i-shelf-date" type="text" inputmode="numeric" placeholder="TT.MM oder TT.MM.JJ" value="${esc(shelfDateValue)}" />
+          <div class="small muted2" id="i-shelf-info" style="margin-top:6px;"></div>
         </div>
         <div>
           <label class="small">Barcode</label><br/>
@@ -949,7 +1067,13 @@
         const amount = toNum(m.querySelector("#i-amount")?.value);
         const unit = normalizeUnit(m.querySelector("#i-unit")?.value);
         const price = toNum(m.querySelector("#i-price")?.value);
-        const shelf = Math.max(0, Math.round(toNum(m.querySelector("#i-shelf")?.value) || 0));
+        const shelfRaw = (m.querySelector("#i-shelf-date")?.value || "").trim();
+        let shelf = 0;
+        if (shelfRaw) {
+          const parsedShelf = parseBestBeforeInput(shelfRaw, baseDate);
+          if (!parsedShelf?.ok) return (msg.textContent = "Haltbarkeit bitte als Datum eingeben: TT.MM oder TT.MM.JJ.");
+          shelf = parsedShelf.days;
+        }
         const kcal = toNum(m.querySelector("#i-kcal")?.value);
         const protein = toNum(m.querySelector("#i-protein")?.value);
         const carbs = toNum(m.querySelector("#i-carbs")?.value);
