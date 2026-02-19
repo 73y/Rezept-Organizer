@@ -193,7 +193,8 @@
     okText = "Speichern",
     cancelText = "Abbrechen",
     okClass = "primary",
-    onConfirm
+    onConfirm,
+    onCancel
   }) {
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
@@ -231,7 +232,10 @@
       const btn = e.target.closest("button[data-action]");
       if (!btn) return;
       const action = btn.getAttribute("data-action");
-      if (action === "close" || action === "cancel") return close();
+      if (action === "close" || action === "cancel") {
+        onCancel?.(modal, close);
+        return close();
+      }
       if (action === "ok") return onConfirm?.(modal, close);
     });
 
@@ -806,6 +810,9 @@
 
   function openIngredientModal(state, persist, ingOrNull, opts = {}) {
     const isEdit = !!ingOrNull;
+    const noNavigate = !!opts?.noNavigate;
+    const onSaved = typeof opts?.onSaved === "function" ? opts.onSaved : null;
+    const onDone = typeof opts?.onDone === "function" ? opts.onDone : null;
 
     const unitRaw = String(ingOrNull?.unit || "").trim();
     const preUnitRaw = !isEdit ? String(opts?.prefillUnit ?? "").trim() : "";
@@ -991,12 +998,15 @@
           it.unlisted = unlisted;
 
           persist();
+          const saved = it;
           close();
-          window.app.navigate("ingredients");
+          onSaved?.(saved);
+          onDone?.({ saved: true, ingredient: saved, isNew: false });
+          if (!noNavigate) window.app.navigate("ingredients");
           return;
         }
 
-        state.ingredients.push({
+        const newIng = {
           id: uid(),
           name,
           barcode: barcode || "",
@@ -1008,11 +1018,18 @@
 
           categoryId,
           unlisted
-        });
+        };
+
+        state.ingredients.push(newIng);
 
         persist();
         close();
-        window.app.navigate("ingredients");
+        onSaved?.(newIng);
+        onDone?.({ saved: true, ingredient: newIng, isNew: true });
+        if (!noNavigate) window.app.navigate("ingredients");
+      },
+      onCancel: () => {
+        onDone?.({ saved: false, ingredient: null, isNew: !isEdit });
       }
     });
 
@@ -1041,7 +1058,7 @@
 
 
 
-      // Kategorie schnell anlegen (für Scan-Flow)
+      // Kategorie schnell anlegen (ohne aus dem Bearbeiten-Fenster zu fliegen)
       if (a === "catQuickAdd") {
         const content = `
           <div class="small muted2">Neue Zutaten-Kategorie anlegen. Danach bist du wieder im Bearbeiten-Fenster.</div>
@@ -1077,7 +1094,6 @@
 
             const id = uid();
             state.ingredientCategories.push({ id, name });
-            // alphabetisch halten
             state.ingredientCategories.sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
 
             persist();
@@ -1161,7 +1177,13 @@
     });
   }
 
-  window.renderIngredientsView = function (container, state, persist) {
+    // Expose modals for other views (z.B. Bon-Scanner)
+  window.ingredients = window.ingredients || {};
+  window.ingredients.openIngredientModal = function (state, persist, ingOrNull, opts) {
+    return openIngredientModal(state, persist, ingOrNull, opts || {});
+  };
+
+window.renderIngredientsView = function (container, state, persist) {
     if (!Array.isArray(state.ingredients)) state.ingredients = [];
     if (!Array.isArray(state.recipes)) state.recipes = [];
     if (!Array.isArray(state.pantry)) state.pantry = [];
