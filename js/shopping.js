@@ -847,7 +847,18 @@ modal.modal.addEventListener("change", (ev) => {
   function openReceiptGuidedScanModal(state, persist, receiptId, opts = {}) {
     const onFinish = typeof opts.onFinish === "function" ? opts.onFinish : null;
 
-    const getReceipt = () => (state.receipts || []).find((r) => r && r.id === receiptId) || null;
+    const syncState = () => {
+      const latest = window.app?.getState?.();
+      if (latest && typeof latest === "object") state = latest;
+      return state;
+    };
+
+    const persistAndSync = () => {
+      persist();
+      return syncState();
+    };
+
+    const getReceipt = () => (syncState().receipts || []).find((r) => r && r.id === receiptId) || null;
 
     const findNextItemId = (r) => {
       const items = Array.isArray(r?.items) ? r.items : [];
@@ -1033,12 +1044,12 @@ modal.modal.addEventListener("change", (ev) => {
       if (!r || !cur) return;
 
       // Edit modal (Preis/Haltbarkeit) und danach direkt weiter scannen
-      const ing = getIng(state, ingredientId);
+      const ing = getIng(syncState(), ingredientId);
       if (!ing || !window.ingredients?.openIngredientModal) {
         cur.matchedIngredientId = ingredientId || null;
         r.updatedAt = new Date().toISOString();
-        upsertPurchaseLogFromReceiptItem(state, r, cur);
-        persist();
+        upsertPurchaseLogFromReceiptItem(syncState(), r, cur);
+        persistAndSync();
         currentItemId = findNextItemId(r);
         render();
         resumeScan();
@@ -1048,7 +1059,7 @@ modal.modal.addEventListener("change", (ev) => {
       pauseScan();
       stopCamera();
 
-      window.ingredients.openIngredientModal(state, persist, ing, {
+      window.ingredients.openIngredientModal(syncState(), persistAndSync, ing, {
         noNavigate: true,
         // Bon-Scan: Haltbarkeit relativ zum Kaufdatum (Bon-Datum)
         baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
@@ -1067,8 +1078,8 @@ modal.modal.addEventListener("change", (ev) => {
           if (!item) return;
           item.matchedIngredientId = ingredientId || null;
           rr.updatedAt = new Date().toISOString();
-          upsertPurchaseLogFromReceiptItem(state, rr, item);
-          persist();
+          upsertPurchaseLogFromReceiptItem(syncState(), rr, item);
+          persistAndSync();
         },
         onDone: (info) => {
           const saved = !!info?.saved;
@@ -1084,7 +1095,7 @@ modal.modal.addEventListener("change", (ev) => {
       const cur = getCurrentItem(r);
       if (!r || !cur) return;
 
-      const off = await fetchOffSuggestion(state, persist, scannedCode);
+      const off = await fetchOffSuggestion(syncState(), persistAndSync, scannedCode);
       const qty = off?.amount && off?.unit ? { amount: off.amount, unit: off.unit } : null;
 
       const prefillPrice = (() => {
@@ -1115,12 +1126,12 @@ modal.modal.addEventListener("change", (ev) => {
 
         item.matchedIngredientId = id;
         rr.updatedAt = new Date().toISOString();
-        upsertPurchaseLogFromReceiptItem(state, rr, item);
-        persist();
+        upsertPurchaseLogFromReceiptItem(syncState(), rr, item);
+        persistAndSync();
         return true;
       };
 
-      window.ingredients.openIngredientModal(state, persist, null, {
+      window.ingredients.openIngredientModal(syncState(), persistAndSync, null, {
         noNavigate: true,
         baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
         prefillBarcode: scannedCode,
@@ -1155,7 +1166,7 @@ modal.modal.addEventListener("change", (ev) => {
 
       pauseScan();
 
-      const ingByBarcode = findIngredientByBarcode(state, code);
+      const ingByBarcode = findIngredientByBarcode(syncState(), code);
       if (ingByBarcode) {
         const score = nameSimilarity(cur.rawName || "", ingByBarcode.name || "");
         const OK = 0.35;
@@ -1184,7 +1195,7 @@ modal.modal.addEventListener("change", (ev) => {
         return;
       }
 
-      const sug = suggestIngredientsByName(state, cur.rawName || "", 3);
+      const sug = suggestIngredientsByName(syncState(), cur.rawName || "", 3);
       const sugRows = sug.length
         ? sug.map((x) => `
             <button data-action="assignIng" data-ingredient-id="${esc(x.ing.id)}" data-code="${esc(code)}" style="text-align:left;">
