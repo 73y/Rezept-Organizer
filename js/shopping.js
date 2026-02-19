@@ -913,7 +913,17 @@ modal.modal.addEventListener("change", (ev) => {
 
       window.ingredients.openIngredientModal(state, persist, ing, {
         noNavigate: true,
-        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.createdAt || "") : ""),
+        // Bon-Scan: Haltbarkeit relativ zum Kaufdatum (Bon-Datum)
+        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
+        // Bon-Scan: Preis immer dabei (falls Parser mal 0 liefert, muss man ihn trotzdem eintragen)
+        prefillPrice: (() => {
+          const q = Math.max(1, Number(cur?.qty) || 1);
+          const u = Number(cur?.unitPrice);
+          const lt = Number(cur?.lineTotal);
+          const p = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(lt) && lt > 0) ? (lt / q) : 0);
+          return p ? (Math.round(p * 100) / 100) : "";
+        })(),
+        requirePrice: true,
         onDone: () => {
           currentItemId = findNextItemId(getReceipt() || r);
           render();
@@ -949,12 +959,13 @@ modal.modal.addEventListener("change", (ev) => {
 
       window.ingredients.openIngredientModal(state, persist, null, {
         noNavigate: true,
-        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.createdAt || "") : ""),
+        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
         prefillBarcode: scannedCode,
         prefillName: (off?.name || cur.rawName || "").trim(),
         prefillAmount: qty?.amount || 1,
         prefillUnit: qty?.unit || "Stück",
         prefillPrice: prefillPrice,
+        requirePrice: true,
         prefillNutriments: off?.nutriments || null,
         onSaved: (newIng) => {
           try {
@@ -1271,17 +1282,26 @@ modal.modal.addEventListener("change", (ev) => {
       return (r.items || []).find((x) => x && x.id === itemId) || null;
     }
 
-    async function editIngredientThenResume(ing) {
+    async function editIngredientThenResume(ing, opts = {}) {
       if (!ing || !window.ingredients?.openIngredientModal) {
         resumeScan();
         return;
       }
       pauseScan();
       stopCamera();
+
+      const r = (typeof getReceipt === "function") ? getReceipt() : null;
+      const baseDateISO = String(r?.at || r?.createdAt || "");
+
+      const extOnDone = typeof opts?.onDone === "function" ? opts.onDone : null;
+
       window.ingredients.openIngredientModal(state, persist, ing, {
+        ...(opts || {}),
         noNavigate: true,
-        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.createdAt || "") : ""),
-        onDone: () => {
+        baseDateISO,
+        requirePrice: true,
+        onDone: (info) => {
+          try { extOnDone?.(info); } catch {}
           renderHeader();
           startCamera();
         }
@@ -1297,7 +1317,15 @@ modal.modal.addEventListener("change", (ev) => {
       persist();
 
       const ing = getIng(state, ingredientId);
-      await editIngredientThenResume(ing);
+      await editIngredientThenResume(ing, {
+        prefillPrice: (() => {
+          const q = Math.max(1, Number(item?.qty) || 1);
+          const u = Number(item?.unitPrice);
+          const lt = Number(item?.lineTotal);
+          const p = (Number.isFinite(u) && u > 0) ? u : ((Number.isFinite(lt) && lt > 0) ? (lt / q) : 0);
+          return p ? (Math.round(p * 100) / 100) : "";
+        })()
+      });
     }
 
     async function createIngredientFlow({ code, prefillName, prefillAmount, prefillUnit, prefillPrice, prefillNutriments, onCreated }) {
@@ -1310,12 +1338,13 @@ modal.modal.addEventListener("change", (ev) => {
       stopCamera();
       window.ingredients.openIngredientModal(state, persist, null, {
         noNavigate: true,
-        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.createdAt || "") : ""),
+        baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
         prefillBarcode: code,
         prefillName: prefillName || "",
         prefillAmount: prefillAmount || 1,
         prefillUnit: prefillUnit || "Stück",
         prefillPrice: (prefillPrice ?? ""),
+        requirePrice: true,
         prefillNutriments: prefillNutriments || null,
         onSaved: (newIng) => {
           try { onCreated?.(newIng); } catch {}

@@ -994,7 +994,7 @@ modal.addEventListener("click", (e) => {
       <div class="row" style="margin-top:10px;">
         <div>
           <label class="small">Preis pro Packung (€)</label><br/>
-          <input id="i-price" type="number" min="0" step="0.01" placeholder="z. B. 2,99" value="${esc(isEdit ? (ingOrNull?.price ?? "") : (opts?.prefillPrice ?? ""))}" />
+          <input id="i-price" type="number" min="0" step="0.01" placeholder="z. B. 2,99" value="${esc((opts?.prefillPrice !== undefined && opts?.prefillPrice !== null && opts?.prefillPrice !== "") ? opts.prefillPrice : (ingOrNull?.price ?? ""))}" />
         </div>
         <div>
           <label class="small">Haltbarkeit (Datum)</label><br/>
@@ -1104,7 +1104,12 @@ modal.addEventListener("click", (e) => {
 
         if (!Number.isFinite(amount) || amount <= 0) return (msg.textContent = "Bitte Menge pro Packung > 0 eingeben.");
         if (!unit) return (msg.textContent = "Bitte Einheit wählen (Stück / g / ml)." );
-        if (!Number.isFinite(price) || price < 0) return (msg.textContent = "Bitte Preis eingeben (0 oder größer)." );
+        // Preis ist normalerweise optional (0 = unbekannt).
+        // Im Bon-Scan kann er erzwungen werden (opts.requirePrice).
+        const requirePrice = !!opts?.requirePrice;
+        let priceVal = Number.isFinite(price) ? price : null;
+        if (priceVal !== null && priceVal < 0) return (msg.textContent = "Preis darf nicht negativ sein.");
+        if (requirePrice && priceVal === null) return (msg.textContent = "Bitte Preis eingeben (z. B. 2,99).");
 
         if (isEdit) {
           const it = state.ingredients.find((x) => x.id === ingOrNull.id);
@@ -1114,7 +1119,7 @@ modal.addEventListener("click", (e) => {
           it.barcode = barcode || "";
           it.amount = amount;
           it.unit = unit;
-          it.price = Number((price || 0).toFixed(2));
+          it.price = Number(((priceVal ?? 0) || 0).toFixed(2));
           it.shelfLifeDays = shelf;
           it.nutriments = nutriments || null;
 
@@ -1136,7 +1141,7 @@ modal.addEventListener("click", (e) => {
           barcode: barcode || "",
           amount,
           unit,
-          price: Number((price || 0).toFixed(2)),
+          price: Number(((priceVal ?? 0) || 0).toFixed(2)),
           shelfLifeDays: shelf,
           nutriments: nutriments || null,
 
