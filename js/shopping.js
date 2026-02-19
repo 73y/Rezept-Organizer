@@ -1033,6 +1033,24 @@ modal.modal.addEventListener("change", (ev) => {
       msgEl.textContent = "Barcode scannen…";
     }
 
+    function persistReceiptItemMatch(receiptRef, itemId, ingredientId, { skipIfSame = false } = {}) {
+      const id = ingredientId ? String(ingredientId) : "";
+      if (!id) return false;
+
+      const rr = getReceipt() || receiptRef;
+      const item = (rr?.items || []).find((x) => x && x.id === itemId) || null;
+      if (!rr || !item) return false;
+
+      if (skipIfSame && String(item.matchedIngredientId || "") === id) return true;
+
+      item.matchedIngredientId = id;
+      rr.updatedAt = new Date().toISOString();
+      upsertPurchaseLogFromReceiptItem(state, rr, item);
+      persist();
+      syncState();
+      return true;
+    }
+
     async function assignAndEdit(ingredientId, scannedCode) {
       const r = getReceipt();
       const cur = getCurrentItem(r);
@@ -1041,11 +1059,7 @@ modal.modal.addEventListener("change", (ev) => {
       // Edit modal (Preis/Haltbarkeit) und danach direkt weiter scannen
       const ing = getIng(syncState(), ingredientId);
       if (!ing || !window.ingredients?.openIngredientModal) {
-        cur.matchedIngredientId = ingredientId || null;
-        r.updatedAt = new Date().toISOString();
-        upsertPurchaseLogFromReceiptItem(state, r, cur);
-        persist();
-        syncState();
+        persistReceiptItemMatch(r, cur.id, ingredientId);
         currentItemId = findNextItemId(r);
         render();
         resumeScan();
@@ -1069,14 +1083,7 @@ modal.modal.addEventListener("change", (ev) => {
         })(),
         requirePrice: true,
         onSaved: () => {
-          const rr = getReceipt() || r;
-          const item = (rr.items || []).find((x) => x && x.id === cur.id) || null;
-          if (!item) return;
-          item.matchedIngredientId = ingredientId || null;
-          rr.updatedAt = new Date().toISOString();
-          upsertPurchaseLogFromReceiptItem(state, rr, item);
-          persist();
-        syncState();
+          persistReceiptItemMatch(r, cur.id, ingredientId);
         },
         onDone: (info) => {
           const saved = !!info?.saved;
@@ -1112,23 +1119,6 @@ modal.modal.addEventListener("change", (ev) => {
         return;
       }
 
-      const persistCurrentItemAssignment = (ingredientId) => {
-        const id = ingredientId ? String(ingredientId) : "";
-        if (!id) return false;
-        const rr = getReceipt() || r;
-        const item = (rr?.items || []).find((x) => x && x.id === cur.id) || null;
-        if (!rr || !item) return false;
-
-        if (String(item.matchedIngredientId || "") === id) return true;
-
-        item.matchedIngredientId = id;
-        rr.updatedAt = new Date().toISOString();
-        upsertPurchaseLogFromReceiptItem(state, rr, item);
-        persist();
-        syncState();
-        return true;
-      };
-
       window.ingredients.openIngredientModal(state, persist, null, {
         noNavigate: true,
         baseDateISO: (typeof getReceipt === "function" ? (getReceipt()?.at || getReceipt()?.createdAt || "") : ""),
@@ -1141,12 +1131,11 @@ modal.modal.addEventListener("change", (ev) => {
         prefillNutriments: off?.nutriments || null,
         onSaved: (newIng) => {
           try {
-            persistCurrentItemAssignment(newIng?.id);
+            persistReceiptItemMatch(r, cur.id, newIng?.id, { skipIfSame: true });
           } catch {}
         },
         onDone: (info) => {
           const saved = !!info?.saved;
-          if (saved) persistCurrentItemAssignment(info?.ingredient?.id);
           currentItemId = saved ? findNextItemId(getReceipt() || r) : cur.id;
           render();
           startCamera();
