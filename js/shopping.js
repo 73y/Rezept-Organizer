@@ -53,6 +53,8 @@
   function parseReceiptItemsFromText(text) {
   const raw = String(text || "")
     .replace(/\r/g, "\n")
+    .replace(/\u2028/g, "\n")
+    .replace(/\u2029/g, "\n")
     .replace(/\t/g, " ")
     .trim();
 
@@ -60,7 +62,9 @@
 
   const rawLines = raw.split("\n").map((l) => String(l || "").trim()).filter(Boolean);
 
-  // Expand lines if PDF extraction glued multiple rows together.
+  // Some PDFs end up as "one big line" (only soft-wrapped in the textarea).
+  // Or several receipt rows are glued together into one line.
+  // We expand such lines using the price-token heuristic.
   const lines = [];
   for (const l of rawLines) {
     const cleaned = String(l || "").replace(/\s{2,}/g, " ").trim();
@@ -69,7 +73,7 @@
     const priceCount = (cleaned.match(RECEIPT_PRICE_RE) || []).length;
 
     // Typical receipt row has 1–2 prices.
-    // If we see many prices in a single line, split it into multiple "pseudo lines".
+    // Many prices in one line => likely multiple rows glued together.
     if (priceCount >= 4 || (priceCount >= 3 && cleaned.length > 140)) {
       const parts = splitMergedReceiptLine(cleaned);
       for (const p of parts) {
@@ -85,29 +89,28 @@
   let started = false;
   let pendingName = "";
 
-  const isHeaderish = (s) => /^tel\b|^kasse\b|^filiale\b|^markt\b|^rewe\b|^ihre\b|^UMNO\b|^bon\b/i.test(s);
+  const isHeaderish = (s) => (
+    /^tel\b|^kasse\b|^filiale\b|^markt\b|^rewe\b|^ihre\b|^bon\b|^eur\b/i.test(s)
+  );
 
   for (const lineRaw of lines) {
     const line = String(lineRaw || "").trim();
     if (!line) continue;
 
-    // Totals section stop (sum/total/tax).
+    // Stop section (totals/tax)
     if (started && RECEIPT_STOP_RE.test(line)) break;
 
-    // Payment stop lines like "BAR 12,34" / "EC 12,34"
-    if (started) {
-      const isPay = /^\s*(bar|ec)\b/i.test(line);
-      if (isPay) {
-        const pm = line.match(RECEIPT_PRICE_RE);
-        if (pm && pm.length >= 1 && line.length <= 40) break;
-      }
+    // Payment stop lines (only if the row clearly looks like a payment row)
+    if (started && /^\s*(bar|ec)\b/i.test(line)) {
+      const pm = line.match(RECEIPT_PRICE_RE);
+      if (pm && pm.length >= 1 && line.length <= 40) break;
     }
 
     const matches = line.match(RECEIPT_PRICE_RE);
 
-    // Line without price: keep as pending name (for weight items etc.)
+    // Line without price: maybe a continuation of the product name
     if (!matches || matches.length === 0) {
-      if (!isHeaderish(line) && /[A-Za-zÄÖÜäöüß]/.test(line) && line.length <= 60) {
+      if (!isHeaderish(line) && /[A-Za-zÄÖÜäöüß]/.test(line) && line.length <= 70) {
         pendingName = line;
       }
       continue;
@@ -137,11 +140,14 @@
       }
     }
 
-    // If namePart is suspiciously short/numeric, use pendingName
+    // If namePart is suspiciously short/numeric, use pendingName (for weight items etc.)
     if (pendingName && (!/[A-Za-zÄÖÜäöüß]/.test(namePart) || namePart.length < 3)) {
       namePart = pendingName + (namePart ? (" " + namePart) : "");
     }
     pendingName = "";
+
+    // If a split created a leading "A " or "B " token, strip it.
+    namePart = namePart.replace(/^(A|B)\s+/, "").trim();
 
     let qty = 1;
     const mQty = namePart.match(/^(\d+)\s*[xX]\s+(.+)$/);
