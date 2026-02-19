@@ -15,11 +15,6 @@
 
 
   // ---- Bon / Beleg (0.4.0) ----
-  
-  // ---- Bon / Beleg (0.4.0) ----
-  // NOTE: do NOT stop on bare "EC"/"BAR" via generic stop-regex,
-  // because product names can contain "bar" (e.g. Protein Bar).
-  // Payment stop-lines are handled separately with stricter heuristics.
   const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|r\.?\s*zahlung|rundung)/i;
   const RECEIPT_PRICE_RE = /-?\d{1,3}(?:\.\d{3})*,\d{2}/g;
 
@@ -55,136 +50,135 @@
     return { store, at };
   }
 
-  function splitMergedReceiptLine(line) {
-    // Split "one long line" receipts into pseudo-lines.
-    // Heuristic: cut after a price token if the following chunk starts with letters (next item).
-    const s = String(line || "").replace(/\s{2,}/g, " ").trim();
-    if (!s) return [];
-
-    const matches = [...s.matchAll(RECEIPT_PRICE_RE)];
-    if (matches.length <= 2) return [s];
-
-    const parts = [];
-    let lastCut = 0;
-
-    for (let i = 0; i < matches.length; i++) {
-      const m = matches[i];
-      const end = (m.index ?? 0) + m[0].length;
-      const after = s.slice(end);
-
-      // Next chunk begins with a letter -> likely next item starts here
-      if (/^\s+[A-Za-zÄÖÜäöü]/.test(after)) {
-        const chunk = s.slice(lastCut, end).trim();
-        if (chunk && /[A-Za-zÄÖÜäöü]/.test(chunk)) {
-          parts.push(chunk);
-          lastCut = end;
-        }
-      }
-    }
-
-    const tail = s.slice(lastCut).trim();
-    if (tail) parts.push(tail);
-
-    return parts.length ? parts : [s];
-  }
-
   function parseReceiptItemsFromText(text) {
-    // Normalize raw text into lines.
-    // Some PDF extractors produce "one long line" -> we split it using price-token heuristics.
-    const rawLines = String(text || "")
-      .replace(/\r/g, "\n")
-      .split("\n")
-      .map((l) => String(l || "").trim())
-      .filter(Boolean);
+  const raw = String(text || "")
+    .replace(/\r/g, "\n")
+    .replace(/\t/g, " ")
+    .trim();
 
-    const lines = [];
-    for (const l of rawLines) {
-      const cleaned = String(l || "").replace(/\s{2,}/g, " ").trim();
-      if (!cleaned) continue;
+  if (!raw) return [];
 
-      const priceCount = (cleaned.match(RECEIPT_PRICE_RE) || []).length;
+  const rawLines = raw.split("\n").map((l) => String(l || "").trim()).filter(Boolean);
 
-      // If we see many prices in one "line", it's almost certainly multiple receipt rows glued together.
-      if (priceCount >= 4 || (priceCount >= 3 && cleaned.length > 160)) {
-        const parts = splitMergedReceiptLine(cleaned);
-        for (const p of parts) lines.push(p);
-      } else {
-        lines.push(cleaned);
+  // Expand lines if PDF extraction glued multiple rows together.
+  const lines = [];
+  for (const l of rawLines) {
+    const cleaned = String(l || "").replace(/\s{2,}/g, " ").trim();
+    if (!cleaned) continue;
+
+    const priceCount = (cleaned.match(RECEIPT_PRICE_RE) || []).length;
+
+    // Typical receipt row has 1–2 prices.
+    // If we see many prices in a single line, split it into multiple "pseudo lines".
+    if (priceCount >= 4 || (priceCount >= 3 && cleaned.length > 140)) {
+      const parts = splitMergedReceiptLine(cleaned);
+      for (const p of parts) {
+        const pp = String(p || "").replace(/\s{2,}/g, " ").trim();
+        if (pp) lines.push(pp);
       }
+    } else {
+      lines.push(cleaned);
     }
-
-    const items = [];
-    let started = false;
-
-    for (const lineRaw of lines) {
-      const line = String(lineRaw || "").trim();
-      if (!line) continue;
-
-      // Stop section (totals/payment/tax)
-      if (started && RECEIPT_STOP_RE.test(line)) break;
-
-      // Extra stop heuristic for payment rows like "BAR 12,34" or "EC 12,34"
-      if (started && /(^|\s)(ec|bar)(\s|$)/i.test(line) && line.length <= 24) break;
-
-      const matches = line.match(RECEIPT_PRICE_RE);
-      if (!matches || matches.length === 0) continue;
-
-      const lastStr = matches[matches.length - 1];
-      const lastIdx = line.lastIndexOf(lastStr);
-      if (lastIdx < 0) continue;
-
-      // Heuristic: ignore lines that look like headers
-      if (/^tel\b|^kasse\b|^filiale\b/i.test(line)) continue;
-
-      started = true;
-
-      const lineTotal = parseEuroStr(lastStr);
-      if (!Number.isFinite(lineTotal)) continue;
-
-      const secondLastStr = matches.length >= 2 ? matches[matches.length - 2] : null;
-      const unitPriceMaybe = secondLastStr ? parseEuroStr(secondLastStr) : NaN;
-
-      let namePart = line.slice(0, lastIdx).trim();
-      if (secondLastStr) {
-        const idx2 = namePart.lastIndexOf(secondLastStr);
-        if (idx2 >= 0 && idx2 + secondLastStr.length >= namePart.length - 1) {
-          namePart = namePart.slice(0, idx2).trim();
-        }
-      }
-
-      let qty = 1;
-      const mQty = namePart.match(/^(\d+)\s*[xX]\s+(.+)$/);
-      if (mQty) {
-        qty = Math.max(1, Math.round(Number(mQty[1]) || 1));
-        namePart = String(mQty[2] || "").trim();
-      } else if (Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0) {
-        const ratio = lineTotal / unitPriceMaybe;
-        const r = Math.round(ratio);
-        if (Number.isFinite(ratio) && r > 0 && Math.abs(ratio - r) < 0.05) qty = r;
-      }
-
-      const unitPrice = Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0 ? unitPriceMaybe : (lineTotal / qty);
-      const rawName = namePart.replace(/\s{2,}/g, " ").trim();
-
-      const low = rawName.toLowerCase();
-      let kind = "item";
-      if (/pfand/.test(low)) kind = "pfand";
-      else if (/rabatt|coupon|gutschein|payback|aktion|bonus/.test(low)) kind = "discount";
-      else if (/mwst|ust/.test(low)) kind = "misc";
-
-      items.push({
-        id: uid(),
-        rawName: rawName || "(unbekannt)",
-        qty: Math.max(1, qty),
-        unitPrice: Math.round((Number(unitPrice) || 0) * 100) / 100,
-        lineTotal: Math.round((Number(lineTotal) || 0) * 100) / 100,
-        matchedIngredientId: null,
-        kind
-      });
-    }
-
-    return items;
   }
+
+  const items = [];
+  let started = false;
+  let pendingName = "";
+
+  const isHeaderish = (s) => /^tel\b|^kasse\b|^filiale\b|^markt\b|^rewe\b|^ihre\b|^UMNO\b|^bon\b/i.test(s);
+
+  for (const lineRaw of lines) {
+    const line = String(lineRaw || "").trim();
+    if (!line) continue;
+
+    // Totals section stop (sum/total/tax).
+    if (started && RECEIPT_STOP_RE.test(line)) break;
+
+    // Payment stop lines like "BAR 12,34" / "EC 12,34"
+    if (started) {
+      const isPay = /^\s*(bar|ec)\b/i.test(line);
+      if (isPay) {
+        const pm = line.match(RECEIPT_PRICE_RE);
+        if (pm && pm.length >= 1 && line.length <= 40) break;
+      }
+    }
+
+    const matches = line.match(RECEIPT_PRICE_RE);
+
+    // Line without price: keep as pending name (for weight items etc.)
+    if (!matches || matches.length === 0) {
+      if (!isHeaderish(line) && /[A-Za-zÄÖÜäöüß]/.test(line) && line.length <= 60) {
+        pendingName = line;
+      }
+      continue;
+    }
+
+    const lastStr = matches[matches.length - 1];
+    const lastIdx = line.lastIndexOf(lastStr);
+    if (lastIdx < 0) continue;
+
+    if (isHeaderish(line)) continue;
+
+    started = true;
+
+    const lineTotal = parseEuroStr(lastStr);
+    if (!Number.isFinite(lineTotal)) continue;
+
+    const secondLastStr = matches.length >= 2 ? matches[matches.length - 2] : null;
+    const unitPriceMaybe = secondLastStr ? parseEuroStr(secondLastStr) : NaN;
+
+    let namePart = line.slice(0, lastIdx).trim();
+
+    // Remove trailing unit price token from namePart if it looks like "... 1,99"
+    if (secondLastStr) {
+      const idx2 = namePart.lastIndexOf(secondLastStr);
+      if (idx2 >= 0 && idx2 + secondLastStr.length >= namePart.length - 1) {
+        namePart = namePart.slice(0, idx2).trim();
+      }
+    }
+
+    // If namePart is suspiciously short/numeric, use pendingName
+    if (pendingName && (!/[A-Za-zÄÖÜäöüß]/.test(namePart) || namePart.length < 3)) {
+      namePart = pendingName + (namePart ? (" " + namePart) : "");
+    }
+    pendingName = "";
+
+    let qty = 1;
+    const mQty = namePart.match(/^(\d+)\s*[xX]\s+(.+)$/);
+    if (mQty) {
+      qty = Math.max(1, Math.round(Number(mQty[1]) || 1));
+      namePart = String(mQty[2] || "").trim();
+    } else if (Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0) {
+      const ratio = lineTotal / unitPriceMaybe;
+      const r = Math.round(ratio);
+      if (Number.isFinite(ratio) && r > 0 && Math.abs(ratio - r) < 0.05) qty = r;
+    }
+
+    const unitPrice = (Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0)
+      ? unitPriceMaybe
+      : (qty ? (lineTotal / qty) : lineTotal);
+
+    const rawName = String(namePart || "").replace(/\s{2,}/g, " ").trim();
+
+    const low = rawName.toLowerCase();
+    let kind = "item";
+    if (/pfand/.test(low)) kind = "pfand";
+    else if (/rabatt|coupon|gutschein|payback|aktion|bonus/.test(low)) kind = "discount";
+    else if (/mwst|ust/.test(low)) kind = "misc";
+
+    items.push({
+      id: uid(),
+      rawName: rawName || "(unbekannt)",
+      qty: Math.max(1, qty),
+      unitPrice: Math.round((Number(unitPrice) || 0) * 100) / 100,
+      lineTotal: Math.round((Number(lineTotal) || 0) * 100) / 100,
+      matchedIngredientId: null,
+      kind
+    });
+  }
+
+  return items;
+}
 
   // If pdf text extraction "glues" multiple receipt rows into one long line,
   // we try to split it back into multiple lines by cutting after price tokens.
