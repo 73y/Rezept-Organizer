@@ -128,6 +128,45 @@
     return items;
   }
 
+  // If pdf text extraction "glues" multiple receipt rows into one long line,
+  // we try to split it back into multiple lines by cutting after price tokens.
+  // This is a heuristic, but it fixes the common case where the PDF has tiny line spacing.
+  function splitMergedReceiptLine(line) {
+    const s = String(line || "").replace(/\s{2,}/g, " ").trim();
+    if (!s) return [];
+    const ms = Array.from(s.matchAll(RECEIPT_PRICE_RE));
+    if (ms.length <= 3) return [s];
+
+    const out = [];
+    let lastCut = 0;
+
+    for (let i = 0; i < ms.length; i++) {
+      const m = ms[i];
+      let end = (m.index || 0) + String(m[0] || "").length;
+
+      // If two prices are basically adjacent (unit price + line total), keep them in one segment.
+      if (i + 1 < ms.length) {
+        const n = ms[i + 1];
+        const gap = (n.index || 0) - end;
+        if (gap >= 0 && gap <= 3) {
+          end = (n.index || 0) + String(n[0] || "").length;
+          i++;
+        }
+      }
+
+      const seg = s.slice(lastCut, end).trim();
+      lastCut = end;
+
+      if (seg && /[A-Za-zÄÖÜäöüß]/.test(seg)) out.push(seg);
+    }
+
+    const rest = s.slice(lastCut).trim();
+    if (rest && /[A-Za-zÄÖÜäöüß]/.test(rest)) out.push(rest);
+
+    return out.length ? out : [s];
+  }
+
+
   async function ensurePdfJs() {
     // pdf.js (UMD build) – needs to attach window.pdfjsLib
     if (window.pdfjsLib && window.pdfjsLib.getDocument) return window.pdfjsLib;
@@ -201,6 +240,7 @@
     }
 
     const linesOut = [];
+
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
       const content = await page.getTextContent();
@@ -216,27 +256,72 @@
       // Sort: top->bottom, left->right
       items.sort((a, b) => b.y - a.y || a.x - b.x);
 
+      // Adaptive y tolerance: some PDFs have very tight line spacing.
+      // We estimate a threshold from y-differences of distinct y-values.
+      const yVals = Array.from(new Set(items.map((it) => Math.round(it.y * 10) / 10))).sort((a, b) => b - a);
+      const diffs = [];
+      for (let i = 1; i < yVals.length; i++) {
+        const d = Math.abs(yVals[i - 1] - yVals[i]);
+        if (d > 0.05) diffs.push(d);
+      }
+      diffs.sort((a, b) => a - b);
+      const med = diffs.length ? diffs[Math.floor(diffs.length / 2)] : 3.0;
+      const yTol = Math.max(1.2, Math.min(3.0, (Number(med) || 3.0) * 0.65));
+
       let curY = null;
+      let prevX = null;
       let cur = [];
+
+      const pushLine = (line) => {
+        const cleaned = String(line || "").replace(/\s{2,}/g, " ").trim();
+        if (!cleaned) return;
+        const priceCount = (cleaned.match(RECEIPT_PRICE_RE) || []).length;
+
+        // If a line contains many prices, it's often multiple receipt rows glued together.
+        if (priceCount >= 6 || (priceCount >= 4 && cleaned.length > 120)) {
+          const parts = splitMergedReceiptLine(cleaned);
+          for (const part of parts) linesOut.push(part);
+          return;
+        }
+        linesOut.push(cleaned);
+      };
+
       const flush = () => {
         if (!cur.length) return;
-        linesOut.push(cur.join(" ").replace(/\s{2,}/g, " ").trim());
+        pushLine(cur.join(" "));
         cur = [];
       };
 
       for (const it of items) {
         if (curY === null) {
           curY = it.y;
+          prevX = it.x;
           cur.push(it.str);
           continue;
         }
-        // y tolerance (pdf coords are floaty)
-        if (Math.abs(it.y - curY) > 3.0) {
+
+        const dy = Math.abs(it.y - curY);
+
+        // New row if y jumps enough…
+        let newRow = dy > yTol;
+
+        // …or if x resets to the left while y slightly changed (tight line spacing).
+        if (!newRow && prevX !== null) {
+          const xReset = it.x < (prevX - 120);
+          if (xReset && dy > (yTol * 0.25)) newRow = true;
+        }
+
+        if (newRow) {
           flush();
           curY = it.y;
+          prevX = it.x;
+        } else {
+          prevX = it.x;
         }
+
         cur.push(it.str);
       }
+
       flush();
       linesOut.push(""); // page break
     }
@@ -245,8 +330,6 @@
     if (!out) throw new Error("PDF enthält keinen lesbaren Text.");
     return out;
   }
-
-
 
   // Auto-read selected receipt file and prefill textarea (so user doesn't need to press "Vorschau" just to read)
   async function prefillReceiptTextFromFile(modalEl, file) {
@@ -302,7 +385,15 @@
     return { matched, total };
   }
 
-  function findPurchaseLogEntryForReceiptItem(state, receiptId, receiptItemId) {
+  
+  function deleteReceiptAndRelated(state, receiptId) {
+    if (!receiptId) return;
+    state.receipts = (state.receipts || []).filter((r) => r && r.id !== receiptId);
+    // Remove any purchaseLog entries that came from this receipt (to avoid stats ghosts & duplicates after re-import)
+    state.purchaseLog = (state.purchaseLog || []).filter((e) => !(e && e.source === "receipt" && e.receiptId === receiptId));
+  }
+
+function findPurchaseLogEntryForReceiptItem(state, receiptId, receiptItemId) {
     return (state.purchaseLog || []).find((e) => e && e.source === "receipt" && e.receiptId === receiptId && e.receiptItemId === receiptItemId) || null;
   }
 
@@ -415,6 +506,8 @@
         <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
           <button class=\"success\" data-action=\"guidedScan\" data-receipt-id=\"${esc(r.id)}\">Geführtes Scannen</button>
           <button class=\"info\" data-action=\"freeScan\" data-receipt-id=\"${esc(r.id)}\">Freies Scannen</button>
+        
+          <button class="danger" data-action="deleteReceipt" data-receipt-id="${esc(r.id)}">Bon löschen</button>
         </div>
         <div style="margin-top:10px;">${rows || `<div class="small">Keine Positionen erkannt.</div>`}</div>
       `;
@@ -441,7 +534,26 @@
       const btn = ev.target.closest("button[data-action]");
       if (!btn) return;
       const a = btn.getAttribute("data-action");
-      if (a === "guidedScan") {
+      
+      if (a === "deleteReceipt") {
+        const id = btn.getAttribute("data-receipt-id") || receiptId;
+        const r = (state.receipts || []).find((x) => x && x.id === id);
+        if (!r) return;
+
+        const ok = confirm(`Bon wirklich löschen?
+
+${r.store || "Bon"} · ${fmtDate(r.at)}
+
+Hinweis: Dazu werden auch die zugehörigen Ausgaben-Einträge entfernt.`);
+        if (!ok) return;
+
+        deleteReceiptAndRelated(state, id);
+        persist();
+        modal.close();
+        return;
+      }
+
+if (a === "guidedScan") {
         openReceiptGuidedScanModal(state, persist, receiptId, {
           onFinish: () => {
             const body = modal.modal.querySelector(".modal-body");
@@ -1619,6 +1731,7 @@ function openReceiptsHub(state, persist) {
               <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
                 <button class="success" data-action="scanReceipt" data-receipt-id="${esc(r.id)}">Scannen</button>
                 <button class="info" data-action="openReceipt" data-receipt-id="${esc(r.id)}">Öffnen</button>
+                <button class="danger" data-action="deleteReceipt" data-receipt-id="${esc(r.id)}">Löschen</button>
               </div>
             </div>
           </div>
@@ -1696,7 +1809,29 @@ function openReceiptsHub(state, persist) {
         return;
       }
 
-      if (a === "openReceipt") {
+      
+      if (a === "deleteReceipt") {
+        const id = btn.getAttribute("data-receipt-id");
+        if (!id) return;
+        const r = (state.receipts || []).find((x) => x && x.id === id);
+        if (!r) return;
+
+        const ok = confirm(`Bon wirklich löschen?
+
+${r.store || "Bon"} · ${fmtDate(r.at)}
+
+Hinweis: Dazu werden auch die zugehörigen Ausgaben-Einträge entfernt (damit du den Bon sauber neu importieren kannst).`);
+        if (!ok) return;
+
+        deleteReceiptAndRelated(state, id);
+        persist();
+
+        const body = modal.modal.querySelector(".modal-body");
+        if (body) body.innerHTML = render();
+        return;
+      }
+
+if (a === "openReceipt") {
         const id = btn.getAttribute("data-receipt-id");
         if (!id) return;
         openReceiptDetailModal(state, persist, id);

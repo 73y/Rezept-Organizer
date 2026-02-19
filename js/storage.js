@@ -103,9 +103,6 @@ function defaultState() {
   return {
     ingredients: [], // {id,name,amount,unit,price,shelfLifeDays}
     recipes: [],
-    // 0.3.0 Kategorien
-    ingredientCategories: [], // [{id,name}]
-    recipeCategories: [], // [{id,name}]
     plannedRecipes: [],
     shopping: [],
     pantry: [],
@@ -113,6 +110,10 @@ function defaultState() {
     wasteLog: [],
     shoppingSession: { active: false, checked: {}, startedAt: null },
     settings: { enableCookTimer: true, theme: "dark" },
+
+        // Bons / Belege (Import aus PDF/Text)
+    // receipts: [{id, at, store, total, createdAt, updatedAt, items:[{id, rawName, qty, unitPrice, lineTotal, matchedIngredientId, kind}]}]
+    receipts: [],
 
     // Cache für Barcode->Produkt (Open Food Facts Autofill)
     barcodeLookupCache: {}
@@ -149,19 +150,7 @@ function migrateIngredient(old) {
   // Neues Format schon vorhanden?
   if (old && typeof old === "object" && "amount" in old && "unit" in old && "price" in old) {
     const barcode = (String(old.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
-    return {
-      ...old,
-      barcode: barcode || "",
-      nutriments: sanitizeNutriments(old.nutriments),
-
-      // 0.2.0 Zeitstempel
-      lastScannedAt: old.lastScannedAt ?? null,
-      lastPriceAt: old.lastPriceAt ?? null,
-
-      // 0.3.0 Kategorien
-      categoryId: old.categoryId ?? null,
-      unlisted: !!old.unlisted
-    };
+    return { ...old, barcode: barcode || "", nutriments: sanitizeNutriments(old.nutriments) };
   }
 
   const id = old?.id ?? (window.crypto?.randomUUID ? crypto.randomUUID() : "id_" + Date.now());
@@ -174,41 +163,51 @@ function migrateIngredient(old) {
 
   const barcode = (String(old?.barcode ?? "").trim()).replace(/\s+/g, "").replace(/[^0-9]/g, "");
 
+  return { id, name, barcode, amount, unit, price, shelfLifeDays, nutriments: sanitizeNutriments(old?.nutriments) };
+}
+
+
+function migrateReceiptItem(old) {
+  if (!old || typeof old !== "object") return null;
+  const id = old.id ? String(old.id) : uid();
+  const rawName = String(old.rawName ?? old.name ?? "").trim();
+  const qty = Math.max(1, Math.round(Number(old.qty ?? old.packs ?? 1) || 1));
+
+  const unitPrice = Number(String(old.unitPrice ?? "").replace(",", "."));
+  const lineTotal = Number(String(old.lineTotal ?? old.total ?? "").replace(",", "."));
+
+  const kindRaw = String(old.kind || "").toLowerCase();
+  const kind = ["item", "pfand", "discount", "misc"].includes(kindRaw) ? kindRaw : "item";
+
+  const matchedIngredientId = old.matchedIngredientId ? String(old.matchedIngredientId) : null;
+
+  const up = Number.isFinite(unitPrice) ? unitPrice : (Number.isFinite(lineTotal) ? lineTotal / qty : 0);
+  const lt = Number.isFinite(lineTotal) ? lineTotal : (Number.isFinite(unitPrice) ? unitPrice * qty : 0);
+
   return {
     id,
-    name,
-    barcode,
-    amount,
-    unit,
-    price,
-    shelfLifeDays,
-    nutriments: sanitizeNutriments(old?.nutriments),
-
-    // 0.2.0 Zeitstempel
-    lastScannedAt: old?.lastScannedAt ?? null,
-    lastPriceAt: old?.lastPriceAt ?? null,
-
-    // 0.3.0 Kategorien
-    categoryId: old?.categoryId ?? null,
-    unlisted: !!old?.unlisted
+    rawName,
+    qty,
+    unitPrice: Math.round((Number(up) || 0) * 100) / 100,
+    lineTotal: Math.round((Number(lt) || 0) * 100) / 100,
+    matchedIngredientId,
+    kind
   };
 }
 
-function normalizeCategories(arr) {
-  const list = Array.isArray(arr) ? arr : [];
-  const out = [];
-  const seen = new Set();
-  for (const c of list) {
-    if (!c || typeof c !== "object") continue;
-    const id = String(c.id || "").trim();
-    const name = String(c.name || "").trim();
-    if (!id || !name) continue;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    out.push({ id, name });
-  }
-  out.sort((a, b) => (a.name || "").localeCompare(b.name || "", "de"));
-  return out;
+function migrateReceipt(old) {
+  if (!old || typeof old !== "object") return null;
+  const id = old.id ? String(old.id) : uid();
+  const at = old.at ? String(old.at) : nowIso();
+  const store = String(old.store ?? "REWE").trim() || "REWE";
+  const createdAt = old.createdAt ? String(old.createdAt) : nowIso();
+  const updatedAt = old.updatedAt ? String(old.updatedAt) : createdAt;
+
+  const items = Array.isArray(old.items) ? old.items.map(migrateReceiptItem).filter(Boolean) : [];
+  const totalNum = Number(String(old.total ?? "").replace(",", "."));
+  const total = Number.isFinite(totalNum) ? totalNum : items.reduce((s, it) => s + (Number(it.lineTotal) || 0), 0);
+
+  return { id, at, store, createdAt, updatedAt, total: Math.round(total * 100) / 100, items };
 }
 
 function ensureStateShape(state) {
@@ -222,10 +221,6 @@ function ensureStateShape(state) {
 
   next.ingredients = Array.isArray(next.ingredients) ? next.ingredients.map(migrateIngredient) : [];
   next.recipes = Array.isArray(next.recipes) ? next.recipes : [];
-
-  // 0.3.0 Kategorien normalisieren
-  next.ingredientCategories = normalizeCategories(next.ingredientCategories);
-  next.recipeCategories = normalizeCategories(next.recipeCategories);
 
   next.plannedRecipes = Array.isArray(next.plannedRecipes) ? next.plannedRecipes : [];
   // ✅ plannedRecipes normalisieren
@@ -242,6 +237,8 @@ function ensureStateShape(state) {
   next.purchaseLog = Array.isArray(next.purchaseLog) ? next.purchaseLog : [];
   next.wasteLog = Array.isArray(next.wasteLog) ? next.wasteLog : [];
 
+
+  next.receipts = Array.isArray(next.receipts) ? next.receipts.map(migrateReceipt).filter(Boolean) : [];
   // ✅ Barcode Cache normalisieren
   next.barcodeLookupCache = next.barcodeLookupCache && typeof next.barcodeLookupCache === "object" ? next.barcodeLookupCache : {};
 
@@ -267,10 +264,6 @@ function ensureStateShape(state) {
   for (const r of next.recipes) {
     if (!r || typeof r !== "object") continue;
     r.items = Array.isArray(r.items) ? r.items : [];
-
-    // 0.3.0: Kategorienfeld
-    if (!("categoryId" in r)) r.categoryId = null;
-    if (r.categoryId === "") r.categoryId = null;
 
     const raw = Array.isArray(r.cookHistory) ? r.cookHistory : [];
     const fixed = [];
@@ -576,9 +569,9 @@ function saveState(state) {
 }
 
 function resetState() {
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-  } catch {}
+  // In-App "Alle Daten löschen" sollte wirklich ALLES entfernen.
+  // Sonst kann die Recovery-Funktion die Daten beim nächsten Laden wiederherstellen.
+  deleteAllLocalData();
 }
 
 function deleteAllLocalData() {
