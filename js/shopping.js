@@ -1032,15 +1032,13 @@ modal.modal.addEventListener("change", (ev) => {
       const cur = getCurrentItem(r);
       if (!r || !cur) return;
 
-      cur.matchedIngredientId = ingredientId || null;
-      r.updatedAt = new Date().toISOString();
-
-      upsertPurchaseLogFromReceiptItem(state, r, cur);
-      persist();
-
       // Edit modal (Preis/Haltbarkeit) und danach direkt weiter scannen
       const ing = getIng(state, ingredientId);
       if (!ing || !window.ingredients?.openIngredientModal) {
+        cur.matchedIngredientId = ingredientId || null;
+        r.updatedAt = new Date().toISOString();
+        upsertPurchaseLogFromReceiptItem(state, r, cur);
+        persist();
         currentItemId = findNextItemId(r);
         render();
         resumeScan();
@@ -1063,8 +1061,18 @@ modal.modal.addEventListener("change", (ev) => {
           return p ? (Math.round(p * 100) / 100) : "";
         })(),
         requirePrice: true,
-        onDone: () => {
-          currentItemId = findNextItemId(getReceipt() || r);
+        onSaved: () => {
+          const rr = getReceipt() || r;
+          const item = (rr.items || []).find((x) => x && x.id === cur.id) || null;
+          if (!item) return;
+          item.matchedIngredientId = ingredientId || null;
+          rr.updatedAt = new Date().toISOString();
+          upsertPurchaseLogFromReceiptItem(state, rr, item);
+          persist();
+        },
+        onDone: (info) => {
+          const saved = !!info?.saved;
+          currentItemId = saved ? findNextItemId(getReceipt() || r) : cur.id;
           render();
           startCamera();
         }
@@ -1118,8 +1126,9 @@ modal.modal.addEventListener("change", (ev) => {
             }
           } catch {}
         },
-        onDone: () => {
-          currentItemId = findNextItemId(getReceipt() || r);
+        onDone: (info) => {
+          const saved = !!info?.saved;
+          currentItemId = saved ? findNextItemId(getReceipt() || r) : cur.id;
           render();
           startCamera();
         }
@@ -1238,6 +1247,10 @@ modal.modal.addEventListener("change", (ev) => {
         return;
       }
     });
+
+    render();
+    startCamera();
+  }
 
     
 
@@ -1735,11 +1748,6 @@ modal.modal.addEventListener("change", (ev) => {
     });
 
     renderHeader();
-    startCamera();
-  }
-
-// initial
-    render();
     startCamera();
   }
 
