@@ -587,14 +587,6 @@ function deleteAllLocalData() {
         localStorage.removeItem(k);
       } catch {}
     }
-
-    // Extra: entferne auch Legacy-Keys (ältere Versionen / andere Unter-Apps)
-    try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const k = localStorage.key(i);
-        if (k && k.startsWith("einkauf_rezepte")) localStorage.removeItem(k);
-      }
-    } catch {}
   } catch {}
 }
 

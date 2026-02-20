@@ -2,6 +2,7 @@
   const VIEWS = ["dashboard", "inventory", "ingredients", "recipes", "shopping", "stats", "settings", "purchaselog", "cookhistory"];
   let currentView = "dashboard";
   let state = null;
+  window.__BUILD = "v0.4.15-20260220100504";
 
   const $ = (sel) => document.querySelector(sel);
   const $all = (sel) => Array.from(document.querySelectorAll(sel));
@@ -26,7 +27,13 @@
 
   function persist({ renderNow = false } = {}) {
     const saved = saveState(state);
-    if (saved) state = saved;
+
+    // Keep the same object reference for all modules.
+    if (saved && saved !== state) {
+      for (const k of Object.keys(state)) delete state[k];
+      Object.assign(state, saved);
+    }
+
     applyThemeFromState();
     if (renderNow) render(currentView);
     return state;
@@ -117,43 +124,46 @@
     showView(currentView);
   });
 
-  // PWA: Service Worker registrieren (funktioniert auf HTTPS oder localhost)
+  // PWA: Service Worker registrieren
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", async () => {
       try {
-        const reg = await navigator.serviceWorker.register("./service-worker.js");
+        let refreshing = false;
 
-        // 0.4.x: Beim Öffnen/Neuladen immer aktiv nach Updates suchen.
-        // (ohne lokale Daten anzufassen – nur App-Shell/Cache)
+        const reg = await navigator.serviceWorker.register("./service-worker.js", {
+          updateViaCache: "none"
+        });
+
+        // Immer beim Start nach Updates fragen
         try { await reg.update(); } catch {}
 
-        // Wenn schon ein Update wartet, sofort aktivieren.
+        // Wenn ein neuer SW bereit ist: sofort aktivieren
         if (reg.waiting) {
           reg.waiting.postMessage({ type: "SKIP_WAITING" });
         }
 
-        // Wenn der Controller wechselt (neuer SW aktiv), einmal hart neu laden.
-        // So bekommst du garantiert den neuen Code, ohne „Website-Daten löschen“.
-        let refreshing = false;
-        navigator.serviceWorker.addEventListener("controllerchange", () => {
-          if (refreshing) return;
-          refreshing = true;
-          window.location.reload();
-        });
-
-        // Update-Hinweis (wenn schon eine Version läuft und eine neue installiert wurde)
         reg.addEventListener("updatefound", () => {
           const sw = reg.installing;
           if (!sw) return;
           sw.addEventListener("statechange", () => {
-            if (sw.state === "installed" && navigator.serviceWorker.controller) {
-              // Auto-Update: direkt aktivieren (der controllerchange triggert den Reload)
-              try {
-                reg.waiting?.postMessage?.({ type: "SKIP_WAITING" });
-              } catch {}
-              window.ui?.toast?.("Update wird aktiviert…", { timeoutMs: 2500 });
+            if (sw.state === "installed") {
+              if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+              if (navigator.serviceWorker.controller) {
+                // Optional: Hinweis
+                window.ui?.toast?.("Update installiert", {
+                  actionText: "Neu laden",
+                  onAction: () => window.location.reload(),
+                  timeoutMs: 8000
+                });
+              }
             }
           });
+        });
+
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (refreshing) return;
+          refreshing = true;
+          window.location.reload();
         });
       } catch (e) {
         console.warn("Service Worker konnte nicht registriert werden:", e);

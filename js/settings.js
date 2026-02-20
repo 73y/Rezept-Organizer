@@ -75,6 +75,7 @@
       <div class="card">
         <h2 style="margin:0 0 6px 0;">Einstellungen</h2>
         <p class="small" style="margin:0;">Darstellung, Kochen, Daten-Tools und Verwaltung von Logs.</p>
+        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>v0.4.15-20260220100504</b></p>
       </div>
 
       <div class="card">
@@ -159,8 +160,8 @@
           <button type="button" class="info" data-action="refreshApp">App aktualisieren (Cache)</button>
         </div>
 
-        <div class="small" style="margin-top:10px; opacity:0.85;">
-          „App aktualisieren“ löscht nur den Offline-Cache (Service Worker) und lädt neu – Zutaten/Vorrat bleiben erhalten.
+        <div class="small" style="margin-top:10px; opacity:0.85;">„App aktualisieren“ löscht nur den Offline-Cache (Service Worker) und lädt neu – Zutaten/Vorrat bleiben erhalten.<br/><br/>
+          Import/Export arbeitet lokal im Browser. Export enthält automatisch Metadaten (App + Datum), Import akzeptiert beides: <b>Wrapper</b> oder <b>reinen State</b>.
         </div>
       </div>
     `;
@@ -211,7 +212,7 @@
       }
     });
 
-    container.addEventListener("click", (e) => {
+    container.addEventListener("click", async (e) => {
       const btn = e.target.closest("button[data-action]");
       if (!btn) return;
 
@@ -244,26 +245,6 @@
           console.warn("Repair fehlgeschlagen:", err);
           alert("Prüfen/Reparieren fehlgeschlagen (siehe Konsole).\n\nWenn du willst, exportiere kurz und schick mir die JSON.");
         }
-        return;
-      }
-
-      if (action === "refreshApp") {
-        (async () => {
-          try {
-            // Nur Cache/Service Worker – keine lokalen Daten (localStorage) löschen.
-            if ("caches" in window) {
-              const keys = await caches.keys();
-              await Promise.all(keys.map((k) => caches.delete(k)));
-            }
-            if ("serviceWorker" in navigator) {
-              const regs = await navigator.serviceWorker.getRegistrations();
-              await Promise.all(regs.map((r) => r.unregister()));
-            }
-          } catch (err) {
-            console.warn("App-Refresh fehlgeschlagen:", err);
-          }
-          window.location.reload();
-        })();
         return;
       }
 
@@ -304,7 +285,29 @@
         return;
       }
 
-      if (action === "reset") {
+      
+      if (action === "refreshApp") {
+        try {
+          // 1) Caches löschen
+          if (window.caches && caches.keys) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map((k) => caches.delete(k)));
+          }
+          // 2) Service Worker "neu ziehen"
+          if ("serviceWorker" in navigator) {
+            const reg = await navigator.serviceWorker.getRegistration();
+            try { await reg?.update(); } catch {}
+            // Wenn waiting da ist -> aktivieren
+            if (reg?.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+          }
+        } catch (err) {
+          console.warn("App aktualisieren fehlgeschlagen:", err);
+        }
+        window.location.reload();
+        return;
+      }
+
+if (action === "reset") {
         const ok1 = confirm("Wirklich ALLE lokalen Daten löschen?\n\nDas betrifft auch Backup/Restore-Keys.");
         if (!ok1) return;
 

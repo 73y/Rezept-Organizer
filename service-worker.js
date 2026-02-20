@@ -1,6 +1,5 @@
 /* service-worker.js */
-// Wichtig: CACHE_NAME bei Releases ändern, damit Clients sicher das neue App-Shell bekommen.
-const CACHE_NAME = "einkauf-rezepte-pwa-20260220082000";
+const CACHE_NAME = "einkauf-rezepte-pwa-20260220100504";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -42,14 +41,6 @@ self.addEventListener("install", (event) => {
   );
 });
 
-// Optional: ermöglicht der App, ein Update sofort zu aktivieren.
-self.addEventListener("message", (event) => {
-  const data = event?.data;
-  if (data && data.type === "SKIP_WAITING") {
-    self.skipWaiting();
-  }
-});
-
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
@@ -87,7 +78,8 @@ self.addEventListener("fetch", (event) => {
   // App shell assets: cache-first
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
-    const cached = await cache.match(req, { ignoreSearch: true });
+    const isAsset = url.pathname.endsWith(".js") || url.pathname.endsWith(".css");
+    const cached = await cache.match(req, { ignoreSearch: !isAsset });
     if (cached) return cached;
 
     try {
@@ -98,4 +90,11 @@ self.addEventListener("fetch", (event) => {
       return cached || Response.error();
     }
   })());
+});
+
+
+self.addEventListener("message", (event) => {
+  if (event?.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });

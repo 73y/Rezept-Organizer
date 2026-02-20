@@ -15,7 +15,7 @@
 
 
   // ---- Bon / Beleg (0.4.0) ----
-  const RECEIPT_STOP_RE = /(^|[^A-Za-zÄÖÜäöüß])(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|r\.?\s*zahlung|rundung)($|[^A-Za-zÄÖÜäöüß])/i;
+  const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|ec\b|bar\b|r\.?\s*zahlung|rundung)/i;
   const RECEIPT_PRICE_RE = /-?\d{1,3}(?:\.\d{3})*,\d{2}/g;
 
   function parseEuroStr(s) {
@@ -51,140 +51,82 @@
   }
 
   function parseReceiptItemsFromText(text) {
-  const raw = String(text || "")
-    .replace(/\r/g, "\n")
-    .replace(/\u2028/g, "\n")
-    .replace(/\u2029/g, "\n")
-    .replace(/\t/g, " ")
-    .trim();
+    const lines = String(text || "")
+      .replace(/\r/g, "\n")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
 
-  if (!raw) return [];
+    const items = [];
+    let started = false;
 
-  const rawLines = raw.split("\n").map((l) => String(l || "").trim()).filter(Boolean);
+    for (const lineRaw of lines) {
+      const line = String(lineRaw || "").trim();
+      if (!line) continue;
 
-  // Some PDFs end up as "one big line" (only soft-wrapped in the textarea).
-  // Or several receipt rows are glued together into one line.
-  // We expand such lines using the price-token heuristic.
-  const lines = [];
-  for (const l of rawLines) {
-    const cleaned = String(l || "").replace(/\s{2,}/g, " ").trim();
-    if (!cleaned) continue;
+      if (started && RECEIPT_STOP_RE.test(line)) break;
 
-    const priceCount = (cleaned.match(RECEIPT_PRICE_RE) || []).length;
+      const matches = line.match(RECEIPT_PRICE_RE);
+      if (!matches || matches.length === 0) continue;
 
-    // Typical receipt row has 1–2 prices.
-    // Many prices in one line => likely multiple rows glued together.
-    if (priceCount >= 4 || (priceCount >= 3 && cleaned.length > 140)) {
-      const parts = splitMergedReceiptLine(cleaned);
-      for (const p of parts) {
-        const pp = String(p || "").replace(/\s{2,}/g, " ").trim();
-        if (pp) lines.push(pp);
+      const lastStr = matches[matches.length - 1];
+      const lastIdx = line.lastIndexOf(lastStr);
+      if (lastIdx < 0) continue;
+
+      // Heuristic: ignore lines that look like headers or phone numbers, etc.
+      if (/^tel\b|^kasse\b|^filiale\b/i.test(line)) continue;
+
+      started = true;
+
+      const lineTotal = parseEuroStr(lastStr);
+      if (!Number.isFinite(lineTotal)) continue;
+
+      const secondLastStr = matches.length >= 2 ? matches[matches.length - 2] : null;
+      const unitPriceMaybe = secondLastStr ? parseEuroStr(secondLastStr) : NaN;
+
+      let namePart = line.slice(0, lastIdx).trim();
+      if (secondLastStr) {
+        const idx2 = namePart.lastIndexOf(secondLastStr);
+        if (idx2 >= 0 && idx2 + secondLastStr.length >= namePart.length - 1) {
+          namePart = namePart.slice(0, idx2).trim();
+        }
       }
-    } else {
-      lines.push(cleaned);
+
+      let qty = 1;
+      const mQty = namePart.match(/^(\d+)\s*[xX]\s+(.+)$/);
+      if (mQty) {
+        qty = Math.max(1, Math.round(Number(mQty[1]) || 1));
+        namePart = String(mQty[2] || "").trim();
+      } else if (Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0) {
+        const ratio = lineTotal / unitPriceMaybe;
+        const r = Math.round(ratio);
+        if (Number.isFinite(ratio) && r > 0 && Math.abs(ratio - r) < 0.05) qty = r;
+      }
+
+      const unitPrice = Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0 ? unitPriceMaybe : (lineTotal / qty);
+
+      const rawName = namePart.replace(/\s{2,}/g, " ").trim();
+
+      // classify
+      const low = rawName.toLowerCase();
+      let kind = "item";
+      if (/pfand/.test(low)) kind = "pfand";
+      else if (/rabatt|coupon|gutschein|payback|aktion|bonus/.test(low)) kind = "discount";
+      else if (/mwst|ust/.test(low)) kind = "misc";
+
+      items.push({
+        id: uid(),
+        rawName: rawName || "(unbekannt)",
+        qty: Math.max(1, qty),
+        unitPrice: Math.round((Number(unitPrice) || 0) * 100) / 100,
+        lineTotal: Math.round((Number(lineTotal) || 0) * 100) / 100,
+        matchedIngredientId: null,
+        kind
+      });
     }
+
+    return items;
   }
-
-  const items = [];
-  let started = false;
-  let pendingName = "";
-
-  const isHeaderish = (s) => (
-    /^tel\b|^kasse\b|^filiale\b|^markt\b|^rewe\b|^ihre\b|^bon\b|^eur\b/i.test(s)
-  );
-
-  for (const lineRaw of lines) {
-    const line = String(lineRaw || "").trim();
-    if (!line) continue;
-
-    // Stop section (totals/tax)
-    if (started && RECEIPT_STOP_RE.test(line)) break;
-
-    // Payment stop lines (only if the row clearly looks like a payment row)
-    if (started && /^\s*(bar|ec)\b/i.test(line)) {
-      const pm = line.match(RECEIPT_PRICE_RE);
-      if (pm && pm.length >= 1 && line.length <= 40) break;
-    }
-
-    const matches = line.match(RECEIPT_PRICE_RE);
-
-    // Line without price: maybe a continuation of the product name
-    if (!matches || matches.length === 0) {
-      if (!isHeaderish(line) && /[A-Za-zÄÖÜäöüß]/.test(line) && line.length <= 70) {
-        pendingName = line;
-      }
-      continue;
-    }
-
-    const lastStr = matches[matches.length - 1];
-    const lastIdx = line.lastIndexOf(lastStr);
-    if (lastIdx < 0) continue;
-
-    if (isHeaderish(line)) continue;
-
-    started = true;
-
-    const lineTotal = parseEuroStr(lastStr);
-    if (!Number.isFinite(lineTotal)) continue;
-
-    const secondLastStr = matches.length >= 2 ? matches[matches.length - 2] : null;
-    const unitPriceMaybe = secondLastStr ? parseEuroStr(secondLastStr) : NaN;
-
-    let namePart = line.slice(0, lastIdx).trim();
-
-    // Remove trailing unit price token from namePart if it looks like "... 1,99"
-    if (secondLastStr) {
-      const idx2 = namePart.lastIndexOf(secondLastStr);
-      if (idx2 >= 0 && idx2 + secondLastStr.length >= namePart.length - 1) {
-        namePart = namePart.slice(0, idx2).trim();
-      }
-    }
-
-    // If namePart is suspiciously short/numeric, use pendingName (for weight items etc.)
-    if (pendingName && (!/[A-Za-zÄÖÜäöüß]/.test(namePart) || namePart.length < 3)) {
-      namePart = pendingName + (namePart ? (" " + namePart) : "");
-    }
-    pendingName = "";
-
-    // If a split created a leading "A " or "B " token, strip it.
-    namePart = namePart.replace(/^(A|B)\s+/, "").trim();
-
-    let qty = 1;
-    const mQty = namePart.match(/^(\d+)\s*[xX]\s+(.+)$/);
-    if (mQty) {
-      qty = Math.max(1, Math.round(Number(mQty[1]) || 1));
-      namePart = String(mQty[2] || "").trim();
-    } else if (Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0) {
-      const ratio = lineTotal / unitPriceMaybe;
-      const r = Math.round(ratio);
-      if (Number.isFinite(ratio) && r > 0 && Math.abs(ratio - r) < 0.05) qty = r;
-    }
-
-    const unitPrice = (Number.isFinite(unitPriceMaybe) && unitPriceMaybe > 0)
-      ? unitPriceMaybe
-      : (qty ? (lineTotal / qty) : lineTotal);
-
-    const rawName = String(namePart || "").replace(/\s{2,}/g, " ").trim();
-
-    const low = rawName.toLowerCase();
-    let kind = "item";
-    if (/pfand/.test(low)) kind = "pfand";
-    else if (/rabatt|coupon|gutschein|payback|aktion|bonus/.test(low)) kind = "discount";
-    else if (/(^|[^A-Za-zÄÖÜäöüß])(mwst|ust)($|[^A-Za-zÄÖÜäöüß])/.test(low)) kind = "misc";
-
-    items.push({
-      id: uid(),
-      rawName: rawName || "(unbekannt)",
-      qty: Math.max(1, qty),
-      unitPrice: Math.round((Number(unitPrice) || 0) * 100) / 100,
-      lineTotal: Math.round((Number(lineTotal) || 0) * 100) / 100,
-      matchedIngredientId: null,
-      kind
-    });
-  }
-
-  return items;
-}
 
   // If pdf text extraction "glues" multiple receipt rows into one long line,
   // we try to split it back into multiple lines by cutting after price tokens.
@@ -455,85 +397,7 @@ function findPurchaseLogEntryForReceiptItem(state, receiptId, receiptItemId) {
     return (state.purchaseLog || []).find((e) => e && e.source === "receipt" && e.receiptId === receiptId && e.receiptItemId === receiptItemId) || null;
   }
 
-    function addDaysISO(baseISO, days) {
-    if (!baseISO) return null;
-    const d = new Date(baseISO);
-    if (Number.isNaN(d.getTime())) return null;
-    d.setDate(d.getDate() + (Number(days) || 0));
-    return d.toISOString();
-  }
-
-  // Receipt -> Pantry sync (idempotent per receipt item)
-  function syncPantryFromReceiptItem(state, receipt, item) {
-    try {
-      if (!state || !receipt || !item) return;
-
-      const receiptId = receipt.id || null;
-      const itemId = item.id || null;
-
-      // Remove pantry entry if item is unmapped OR not a real "item" (pfand/discount/etc.)
-      const shouldExist = !!item.matchedIngredientId && (!item.kind || item.kind === "item");
-      if (!shouldExist) {
-        if (receiptId && itemId && Array.isArray(state.pantry)) {
-          const before = state.pantry.length;
-          state.pantry = state.pantry.filter((p) => !(p && p.source === "receipt" && p.receiptId === receiptId && p.receiptItemId === itemId));
-          if (before !== state.pantry.length && typeof normalizePantry === "function") normalizePantry(state);
-        }
-        return;
-      }
-
-      const ing = (state.ingredients || []).find((x) => x && x.id === item.matchedIngredientId) || null;
-      if (!ing) return;
-
-      const qty = Math.max(1, Math.round(Number(item.qty) || 1));
-      const packAmt = Number(ing.amount) || 0;
-      const unit = (ing.unit || "").toString();
-      const amount = packAmt > 0 ? (packAmt * qty) : qty;
-
-      const boughtAt = receipt.at || receipt.createdAt || new Date().toISOString();
-      const expiresAt = (Number(ing.shelfLifeDays) > 0) ? addDaysISO(boughtAt, Number(ing.shelfLifeDays)) : null;
-
-      const cost = Number(item.lineTotal) || 0;
-      const unitCost = (Number.isFinite(cost) && amount > 0) ? (cost / amount) : 0;
-
-      if (!Array.isArray(state.pantry)) state.pantry = [];
-
-      let p = null;
-      if (receiptId && itemId) {
-        p = state.pantry.find((x) => x && x.source === "receipt" && x.receiptId === receiptId && x.receiptItemId === itemId) || null;
-      }
-
-      if (!p) {
-        p = {
-          id: uid(),
-          ingredientId: ing.id,
-          amount: Number(amount.toFixed(4)),
-          unit,
-          boughtAt,
-          enteredAt: new Date().toISOString(),
-          source: "receipt",
-          receiptId,
-          receiptItemId: itemId,
-          expiresAt,
-          cost: Number.isFinite(cost) ? Number(cost.toFixed(2)) : 0,
-          unitCost: Number.isFinite(unitCost) ? Number(unitCost.toFixed(6)) : 0
-        };
-        state.pantry.push(p);
-      } else {
-        p.ingredientId = ing.id;
-        p.amount = Number(amount.toFixed(4));
-        p.unit = unit;
-        p.boughtAt = boughtAt;
-        p.expiresAt = expiresAt;
-        p.cost = Number.isFinite(cost) ? Number(cost.toFixed(2)) : 0;
-        p.unitCost = Number.isFinite(unitCost) ? Number(unitCost.toFixed(6)) : 0;
-      }
-
-      if (typeof normalizePantry === "function") normalizePantry(state);
-    } catch {}
-  }
-
-function upsertPurchaseLogFromReceiptItem(state, receipt, item) {
+  function upsertPurchaseLogFromReceiptItem(state, receipt, item) {
     const at = receipt.at;
     const entry = findPurchaseLogEntryForReceiptItem(state, receipt.id, item.id);
     const qty = Math.max(1, Math.round(Number(item.qty) || 1));
@@ -587,11 +451,7 @@ function upsertPurchaseLogFromReceiptItem(state, receipt, item) {
       entry.unit = "";
       entry.buyAmount = 0;
     }
-
-    // keep pantry in sync
-    syncPantryFromReceiptItem(state, receipt, item);
   }
-
 
   function openReceiptDetailModal(state, persist, receiptId) {
     const receipt = (state.receipts || []).find((r) => r && r.id === receiptId);
