@@ -14,7 +14,6 @@
   const cleanBarcode = (raw) => String(raw ?? "").replace(/\D+/g, "").trim();
   const isValidBarcode = (code) => {
     const c = cleanBarcode(code);
-    // EAN-8 / UPC / EAN-13 / EAN-14
     return !!c && c.length >= 8 && c.length <= 14;
   };
 
@@ -919,6 +918,12 @@ modal.modal.addEventListener("change", (ev) => {
     };
 
     // IMPORTANT: use production (.org) first. The .net domain is staging and may behave differently / require auth.
+    const OFF_FIELDS = "product_name,product_name_de,brands,generic_name,quantity,product_quantity,product_quantity_unit,ingredients_text,ingredients_text_de,nutriments,status,status_verbose";
+    const OFF_V2_ORG = "https://world.openfoodfacts.org/api/v2/product/";
+    const OFF_V2_NET = "https://world.openfoodfacts.net/api/v2/product/";
+    const OFF_V0_ORG = "https://world.openfoodfacts.org/api/v0/product/";
+    const OFF_V0_NET = "https://world.openfoodfacts.net/api/v0/product/";
+
     const urls = [
       `${OFF_V2_ORG}${encodeURIComponent(code)}?fields=${encodeURIComponent(OFF_FIELDS)}&lc=de&cc=de`,
       `${OFF_V0_ORG}${encodeURIComponent(code)}.json`,
@@ -952,6 +957,7 @@ modal.modal.addEventListener("change", (ev) => {
     if (typeof persist === "function") persist();
     return null;
   }
+
   function openReceiptGuidedScanModal(state, persist, receiptId, opts = {}) {
     const onFinish = typeof opts.onFinish === "function" ? opts.onFinish : null;
 
@@ -1275,7 +1281,15 @@ ${offDebugHtml(state, code)}
       }
       // Try Open Food Facts (so we can show OFF debug + prefill)
       msgEl.textContent = "Unbekannter Barcode – Open Food Facts wird geprüft…";
-      const offTmp = await fetchOffSuggestion(state, persist, code);
+      let offTmp = null;
+      try {
+        offTmp = await fetchOffSuggestion(state, persist, code);
+      } catch (e) {
+        const why = String(e?.message || e || "Fehler");
+        msgEl.textContent = `OFF-Check fehlgeschlagen: ${why}`;
+        resultEl.innerHTML = `<div class="small muted2">${esc(msgEl.textContent)}</div>${offDebugHtml(state, code)}`;
+        return;
+      }
       const offNameTmp = String(offTmp?.name || "").trim();
       if (offNameTmp) {
         // Use OFF name for better suggestions if it looks useful
