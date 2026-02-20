@@ -352,13 +352,7 @@ function normalizePantry(state) {
     const ing = ingMap.get(ingId);
     const unit = (p?.unit ?? ing?.unit ?? "").toString();
 
-    
-    // Receipt entries must stay unique per receipt item (otherwise multiple purchases merge and cannot be updated)
-    if (String(p?.source || "") === "receipt" && (p?.receiptId || p?.receiptItemId)) {
-      return `receipt|${p?.receiptId || ""}|${p?.receiptItemId || p?.id || ""}`;
-    }
-
-const boughtDay = dateKey(p?.boughtAt);
+    const boughtDay = dateKey(p?.boughtAt);
     const expDay = dateKey(p?.expiresAt);
 
     // Wenn beides fehlt, NICHT mergen (sonst klebt alles zusammen)
@@ -593,6 +587,14 @@ function deleteAllLocalData() {
         localStorage.removeItem(k);
       } catch {}
     }
+
+    // Extra: entferne auch Legacy-Keys (ältere Versionen / andere Unter-Apps)
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith("einkauf_rezepte")) localStorage.removeItem(k);
+      }
+    } catch {}
   } catch {}
 }
 
