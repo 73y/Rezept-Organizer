@@ -1,5 +1,6 @@
 /* service-worker.js */
-const CACHE_NAME = "einkauf-rezepte-pwa-20260220152915";
+// IMPORTANT: bump this on every deploy so old caches are purged reliably.
+const CACHE_NAME = "einkauf-rezepte-pwa-20260220140000";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -60,42 +61,46 @@ self.addEventListener("fetch", (event) => {
   if (req.mode === "navigate") {
     event.respondWith((async () => {
       try {
+        // Always try network first for HTML to avoid version mismatch.
         const fresh = await fetch(req);
         const cache = await caches.open(CACHE_NAME);
-        // Cache the latest index for offline
         cache.put("./index.html", fresh.clone());
         return fresh;
-      } catch (e) {
+      } catch {
         const cache = await caches.open(CACHE_NAME);
-        return (await cache.match(req, { ignoreSearch: true })) ||
-               (await cache.match("./index.html")) ||
-               (await cache.match("./offline.html"));
+        return (await cache.match("./index.html")) || (await cache.match("./offline.html"));
       }
     })());
     return;
   }
 
-  // App shell assets: stale-while-revalidate (dev-friendly)
+  const isJsCss = url.pathname.endsWith(".js") || url.pathname.endsWith(".css");
+
+  // JS/CSS: NetworkFirst to prevent "new HTML + old JS" situations.
+  if (isJsCss) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      try {
+        const fresh = await fetch(req, { cache: "no-store" });
+        if (fresh && fresh.ok) await cache.put(req, fresh.clone());
+        return fresh;
+      } catch {
+        return (await cache.match(req, { ignoreSearch: false })) || Response.error();
+      }
+    })());
+    return;
+  }
+
+  // Other assets: CacheFirst (icons, etc.)
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
-    const isAsset = url.pathname.endsWith(".js") || url.pathname.endsWith(".css");
-    const cached = await cache.match(req, { ignoreSearch: !isAsset });
-
-    const fetchAndCache = async () => {
-      const fresh = await fetch(req);
-      if (fresh && fresh.ok) cache.put(req, fresh.clone());
-      return fresh;
-    };
-
-    if (cached) {
-      // Update in background for the next reload
-      event.waitUntil(fetchAndCache().catch(() => {}));
-      return cached;
-    }
-
+    const cached = await cache.match(req, { ignoreSearch: true });
+    if (cached) return cached;
     try {
-      return await fetchAndCache();
-    } catch (e) {
+      const fresh = await fetch(req);
+      if (fresh && fresh.ok) await cache.put(req, fresh.clone());
+      return fresh;
+    } catch {
       return cached || Response.error();
     }
   })());

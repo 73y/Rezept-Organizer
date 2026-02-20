@@ -2,7 +2,14 @@
   const VIEWS = ["dashboard", "inventory", "ingredients", "recipes", "shopping", "stats", "settings", "purchaselog", "cookhistory"];
   let currentView = "dashboard";
   let state = null;
-  window.__BUILD = "v0.4.23-20260220152915";
+  window.__BUILD = "v0.4.24-20260220140000";
+
+  function setBuildTagStatus(suffix) {
+    const el = document.querySelector('.build-tag');
+    if (!el) return;
+    const base = (el.textContent || '').split('•')[0].trim() || window.__BUILD.split('-')[0];
+    el.textContent = suffix ? `${base} • ${suffix}` : base;
+  }
 
   const $ = (sel) => document.querySelector(sel);
   const $all = (sel) => Array.from(document.querySelectorAll(sel));
@@ -139,6 +146,7 @@
 
         // Wenn ein neuer SW bereit ist: sofort aktivieren
         if (reg.waiting) {
+          setBuildTagStatus("Update bereit");
           reg.waiting.postMessage({ type: "SKIP_WAITING" });
         }
 
@@ -149,8 +157,9 @@
             if (sw.state === "installed") {
               if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
               if (navigator.serviceWorker.controller) {
-                // Optional: Hinweis
-                window.ui?.toast?.("Update installiert", {
+                // Hinweis + sichtbarer Status
+                setBuildTagStatus("Update bereit");
+                window.ui?.toast?.("Update bereit – neu laden, damit alles frisch ist.", {
                   actionText: "Neu laden",
                   onAction: () => window.location.reload(),
                   timeoutMs: 8000
@@ -163,6 +172,7 @@
         navigator.serviceWorker.addEventListener("controllerchange", () => {
           if (refreshing) return;
           refreshing = true;
+          setBuildTagStatus("Aktualisiere…");
           window.location.reload();
         });
       } catch (e) {
