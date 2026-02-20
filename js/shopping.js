@@ -15,7 +15,7 @@
 
 
   // ---- Bon / Beleg (0.4.0) ----
-  const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|mwst|ust|kartenzahlung|ec\b|bar\b|r\.?\s*zahlung|rundung)/i;
+  const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|\bmwst\b|\bust\b|kartenzahlung|\bec\b|\bbar\b|r\.?\s*zahlung|rundung)/i;
   const RECEIPT_PRICE_RE = /-?\d{1,3}(?:\.\d{3})*,\d{2}/g;
 
   function parseEuroStr(s) {

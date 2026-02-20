@@ -75,17 +75,26 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // App shell assets: cache-first
+  // App shell assets: stale-while-revalidate (dev-friendly)
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
     const isAsset = url.pathname.endsWith(".js") || url.pathname.endsWith(".css");
     const cached = await cache.match(req, { ignoreSearch: !isAsset });
-    if (cached) return cached;
 
-    try {
+    const fetchAndCache = async () => {
       const fresh = await fetch(req);
       if (fresh && fresh.ok) cache.put(req, fresh.clone());
       return fresh;
+    };
+
+    if (cached) {
+      // Update in background for the next reload
+      event.waitUntil(fetchAndCache().catch(() => {}));
+      return cached;
+    }
+
+    try {
+      return await fetchAndCache();
     } catch (e) {
       return cached || Response.error();
     }

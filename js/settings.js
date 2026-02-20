@@ -314,6 +314,7 @@ if (action === "reset") {
         const typed = prompt('Sicherheitsabfrage: Tippe genau "LÖSCHEN" ein, um fortzufahren.');
         if (typed !== "LÖSCHEN") return;
 
+        // 1) LocalStorage (inkl. Backup/Restore)
         if (window.dataTools?.deleteAllLocalData) window.dataTools.deleteAllLocalData();
         else {
           try {
@@ -321,9 +322,37 @@ if (action === "reset") {
           } catch {}
         }
 
+        // 2) Caches + Service Worker (damit du wirklich "clean slate" hast)
+        try {
+          if ("caches" in window) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map((k) => caches.delete(k)));
+          }
+        } catch {}
+        try {
+          if ("serviceWorker" in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map((r) => r.unregister()));
+          }
+        } catch {}
+        try {
+          // IndexedDB (falls Browser/Libs was angelegt haben)
+          if (indexedDB?.databases) {
+            const dbs = await indexedDB.databases();
+            await Promise.all((dbs || []).map((d) => d?.name ? new Promise((res) => {
+              const req = indexedDB.deleteDatabase(d.name);
+              req.onsuccess = req.onerror = req.onblocked = () => res();
+            }) : Promise.resolve()));
+          }
+        } catch {}
+
+        // 3) Frischen State laden + hart reloaden (ohne SW)
         const fresh = loadState();
         window.app.setState(fresh);
         window.app.navigate("dashboard");
+        try { window.ui?.toast?.("Alles gelöscht. App lädt frisch neu…"); } catch {}
+        window.location.replace("./?fresh=" + Date.now());
+        return;
       }
     });
   };
