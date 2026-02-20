@@ -14,6 +14,32 @@
   const cleanBarcode = (raw) => String(raw ?? "").replace(/\D+/g, "").trim();
 
 
+  function offDebugLineFromState(state, code) {
+    try {
+      const dbg = state?.__debug?.lastOff;
+      const c = cleanBarcode(code);
+      if (!dbg || !c || String(dbg.code || "") !== String(c)) return "";
+      const tries = Array.isArray(dbg.tries) ? dbg.tries : [];
+      const parts = tries.map((t) => {
+        let host = "";
+        try { host = new URL(t.url).host; } catch {}
+        const status = t.status ? `HTTP ${t.status}` : "";
+        const note = String(t.note || "").trim();
+        const ok = t.ok ? "ok" : "";
+        return [host, status, note, ok].filter(Boolean).join(" ");
+      }).filter(Boolean);
+      return parts.join(" | ").slice(0, 220);
+    } catch { return ""; }
+  }
+
+  function offDebugHtml(state, code) {
+    const line = offDebugLineFromState(state, code);
+    if (!line) return "";
+    return `<div class="small muted2" style="margin-top:4px;">OFF: ${esc(line)}</div>`;
+  }
+
+
+
   // ---- Bon / Beleg (0.4.0) ----
   const RECEIPT_STOP_RE = /(summe|gesamt|zu\s*zahlen|zahlbetrag|\bmwst\b|\bust\b|kartenzahlung|\bec\b|\bbar\b|r\.?\s*zahlung|rundung)/i;
   const RECEIPT_PRICE_RE = /-?\d{1,3}(?:\.\d{3})*,\d{2}/g;
@@ -1181,22 +1207,6 @@ modal.modal.addEventListener("change", (ev) => {
 
       pauseScan();
 
-      const offDbgLine = (() => {
-        const dbg = state.__debug?.lastOff;
-        if (!dbg || dbg.code !== cleanBarcode(code)) return "";
-        const tries = Array.isArray(dbg.tries) ? dbg.tries : [];
-        const parts = tries.map((t) => {
-          let host = "";
-          try { host = new URL(t.url).hostname.replace(/^world\./, ""); } catch {}
-          const note = t.note || (t.ok ? "OK" : "fail");
-          return `${host ? host + ": " : ""}${note}`;
-        }).filter(Boolean);
-        let txt = parts.join(" | ");
-        if (!txt) return "";
-        if (txt.length > 140) txt = txt.slice(0, 140) + "…";
-        return txt;
-      })();
-
       const ingByBarcode = findIngredientByBarcode(state, code);
       if (ingByBarcode) {
         const score = nameSimilarity(cur.rawName || "", ingByBarcode.name || "");
@@ -1208,7 +1218,7 @@ modal.modal.addEventListener("change", (ev) => {
             <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
               <div style="font-weight:800;">Erkannt: ${esc(ingByBarcode.name || "")}</div>
               <div class="small muted2" style="margin-top:4px;">Barcode: <b>${esc(code)}</b></div>
-${offDbgLine ? `<div class="small muted2" style="margin-top:4px;">OFF: ${esc(offDbgLine)}</div>` : ``}
+${offDebugHtml(state, code)}
 <div class="small muted2" style="margin-top:4px;">Das passt evtl. nicht zu „${esc(cur.rawName || "")}“. Trotzdem zuordnen?</div>
               <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
                 <button class="primary" data-action="assignIng" data-ingredient-id="${esc(ingByBarcode.id)}" data-code="${esc(code)}">Trotzdem zuordnen</button>
@@ -1226,8 +1236,17 @@ ${offDbgLine ? `<div class="small muted2" style="margin-top:4px;">OFF: ${esc(off
         await assignAndEdit(ingByBarcode.id, code);
         return;
       }
+      // Try Open Food Facts (so we can show OFF debug + prefill)
+      msgEl.textContent = "Unbekannter Barcode – Open Food Facts wird geprüft…";
+      const offTmp = await fetchOffSuggestion(state, persist, code);
+      const offNameTmp = String(offTmp?.name || "").trim();
+      if (offNameTmp) {
+        // Use OFF name for better suggestions if it looks useful
+        try { cur.offName = offNameTmp; } catch {}
+      }
 
-      const sug = suggestIngredientsByName(state, cur.rawName || "", 3);
+
+      const sug = suggestIngredientsByName(state, (cur.offName || cur.rawName || ""), 3);
       const sugRows = sug.length
         ? sug.map((x) => `
             <button data-action="assignIng" data-ingredient-id="${esc(x.ing.id)}" data-code="${esc(code)}" style="text-align:left;">
@@ -1240,7 +1259,7 @@ ${offDbgLine ? `<div class="small muted2" style="margin-top:4px;">OFF: ${esc(off
         <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
           <div style="font-weight:800;">Unbekannter Barcode</div>
           <div class="small muted2" style="margin-top:4px;">Barcode: <b>${esc(code)}</b></div>
-${offDbgLine ? `<div class="small muted2" style="margin-top:4px;">OFF: ${esc(offDbgLine)}</div>` : ``}
+${offDebugHtml(state, code)}
 <div class="small muted2" style="margin-top:4px;">Wähle eine passende Zutat oder lege eine neue an.</div>
           <div style="display:grid; gap:8px; margin-top:10px;">${sugRows}</div>
           <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:12px;">
