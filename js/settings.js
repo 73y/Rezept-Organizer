@@ -156,11 +156,11 @@
 
           <button type="button" class="warn" data-action="demo">Demo-Daten laden</button>
           <button type="button" class="danger" data-action="reset">Alle lokalen Daten löschen</button>
-          <button type="button" class="danger" data-action="nuke">Nuklear-Reset (Cache + SW + Daten)</button>
+          <button type="button" class="info" data-action="refreshApp">App aktualisieren (Cache)</button>
         </div>
 
         <div class="small" style="margin-top:10px; opacity:0.85;">
-          Import/Export arbeitet lokal im Browser. Export enthält automatisch Metadaten (App + Datum), Import akzeptiert beides: <b>Wrapper</b> oder <b>reinen State</b>.
+          „App aktualisieren“ löscht nur den Offline-Cache (Service Worker) und lädt neu – Zutaten/Vorrat bleiben erhalten.
         </div>
       </div>
     `;
@@ -211,47 +211,7 @@
       }
     });
 
-    async function nukeSiteData() {
-      // 1) App keys (inkl. Legacy)
-      try {
-        if (window.dataTools?.deleteAllLocalData) window.dataTools.deleteAllLocalData();
-        else {
-          try {
-            for (let i = localStorage.length - 1; i >= 0; i--) {
-              const k = localStorage.key(i);
-              if (k && k.startsWith("einkauf_rezepte")) localStorage.removeItem(k);
-            }
-          } catch {}
-        }
-      } catch {}
-
-      // 2) Cache Storage (Service Worker Caches)
-      try {
-        if (window.caches?.keys) {
-          const keys = await caches.keys();
-          await Promise.all(keys.map((k) => caches.delete(k)));
-        }
-      } catch {}
-
-      // 3) Service Worker unregister
-      try {
-        if (navigator.serviceWorker?.getRegistrations) {
-          const regs = await navigator.serviceWorker.getRegistrations();
-          await Promise.all(regs.map((r) => r.unregister()));
-        }
-      } catch {}
-
-      // 4) Hard reload with cache-bust
-      try {
-        const url = new URL(window.location.href);
-        url.searchParams.set("v", String(Date.now()));
-        window.location.replace(url.toString());
-      } catch {
-        window.location.reload();
-      }
-    }
-
-    container.addEventListener("click", async (e) => {
+    container.addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-action]");
       if (!btn) return;
 
@@ -284,6 +244,26 @@
           console.warn("Repair fehlgeschlagen:", err);
           alert("Prüfen/Reparieren fehlgeschlagen (siehe Konsole).\n\nWenn du willst, exportiere kurz und schick mir die JSON.");
         }
+        return;
+      }
+
+      if (action === "refreshApp") {
+        (async () => {
+          try {
+            // Nur Cache/Service Worker – keine lokalen Daten (localStorage) löschen.
+            if ("caches" in window) {
+              const keys = await caches.keys();
+              await Promise.all(keys.map((k) => caches.delete(k)));
+            }
+            if ("serviceWorker" in navigator) {
+              const regs = await navigator.serviceWorker.getRegistrations();
+              await Promise.all(regs.map((r) => r.unregister()));
+            }
+          } catch (err) {
+            console.warn("App-Refresh fehlgeschlagen:", err);
+          }
+          window.location.reload();
+        })();
         return;
       }
 
@@ -324,18 +304,7 @@
         return;
       }
 
-            if (action === "nuke") {
-        const ok1 = confirm("Nuklear-Reset: Cache + Service Worker + ALLE Daten löschen?\n\nDas ist der stärkste Reset und lädt danach neu.");
-        if (!ok1) return;
-
-        const typed = prompt('Sicherheitsabfrage: Tippe genau "LÖSCHEN" ein, um fortzufahren.');
-        if (typed !== "LÖSCHEN") return;
-
-        await nukeSiteData();
-        return;
-      }
-
-if (action === "reset") {
+      if (action === "reset") {
         const ok1 = confirm("Wirklich ALLE lokalen Daten löschen?\n\nDas betrifft auch Backup/Restore-Keys.");
         if (!ok1) return;
 

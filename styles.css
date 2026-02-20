@@ -1,4 +1,3 @@
-html, body{ overflow-x: hidden; }
 :root{
   --bg: #0f0f10;
   --panel: #17171a;
@@ -671,14 +670,13 @@ button.warn:hover { background: rgba(245,158,11,0.16); }
   max-width:100%;
 }
 
-/* Horizontal scrollable Filter-Chips */
+/* Filter-Chips (wrap, damit die Seite auf Mobile nicht breiter wird) */
 .chipbar{
   display:flex;
   gap:8px;
   align-items:center;
   flex-wrap:wrap;
   overflow-x:hidden;
-  padding-bottom:4px;
 }
 
 .chipbtn{

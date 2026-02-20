@@ -1,5 +1,6 @@
 /* service-worker.js */
-const CACHE_NAME = "einkauf-rezepte-pwa-20260220090613";
+// Wichtig: CACHE_NAME bei Releases ändern, damit Clients sicher das neue App-Shell bekommen.
+const CACHE_NAME = "einkauf-rezepte-pwa-20260220082000";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -39,6 +40,14 @@ self.addEventListener("install", (event) => {
       .then((cache) => cache.addAll(APP_SHELL))
       .then(() => self.skipWaiting())
   );
+});
+
+// Optional: ermöglicht der App, ein Update sofort zu aktivieren.
+self.addEventListener("message", (event) => {
+  const data = event?.data;
+  if (data && data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener("activate", (event) => {

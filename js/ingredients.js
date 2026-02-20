@@ -96,11 +96,32 @@
 
 
   // Open Food Facts Autofill (Barcode -> Name/Packung)
-  const OFF_FIELDS = "code,product_name,product_name_de,quantity,product_quantity,product_quantity_unit,brands,nutriments";
-  const OFF_BASE = "https://world.openfoodfacts.net/api/v2/product/";
-  const OFF_BASE_FALLBACK = "https://world.openfoodfacts.org/api/v2/product/";
-  const OFF_BASE_V0 = "https://world.openfoodfacts.net/api/v0/product/";
-  const OFF_BASE_V0_FALLBACK = "https://world.openfoodfacts.org/api/v0/product/";
+  // Hinweis: Browser können keinen eigenen User-Agent setzen. Daher sind wir defensiv:
+  // v2 (leicht) + v0-Fallback (breiter), plus kurze Timeouts.
+  const OFF_FIELDS = [
+    "product_name",
+    "product_name_de",
+    "quantity",
+    "product_quantity",
+    "product_quantity_unit",
+    "brands",
+    "nutriments",
+    "ingredients_text",
+    "ingredients_text_de",
+    "ingredients_text_with_allergens",
+    "ingredients_text_with_allergens_de",
+    "allergens",
+    "allergens_tags"
+  ].join(",");
+
+  // Production API (empfohlen)
+  const OFF_BASE = "https://world.openfoodfacts.org/api/v2/product/";
+  // v0-Fallbacks (oft toleranter)
+  const OFF_BASE_V0 = "https://world.openfoodfacts.org/api/v0/product/";
+  const OFF_BASE_V0_DE = "https://de.openfoodfacts.org/api/v0/product/";
+
+  // Wird genutzt, um bei Problemen eine verständlichere Meldung anzuzeigen.
+  let lastOffError = "";
 
   function ensureLookupCache(state) {
     if (!state || typeof state !== "object") return {};
@@ -178,59 +199,50 @@
     return null;
   }
 
-async function fetchOffSuggestion(state, persist, barcode) {
-  const code = cleanBarcode(barcode);
-  if (!isValidBarcode(code)) return null;
+  async function fetchOffSuggestion(state, persist, barcode) {
+    lastOffError = "";
 
-  const cache = ensureLookupCache(state);
-  const cached = cache[code];
-  if (cached && typeof cached === "object" && (cached.name || (cached.amount && cached.unit))) return cached;
+    const code = cleanBarcode(barcode);
+    if (!isValidBarcode(code)) return null;
 
-  const tryV2 = async (base) => {
-    const url = `${base}${encodeURIComponent(code)}?fields=${OFF_FIELDS}&lc=de&cc=de`;
-    const res = await fetch(url, { method: "GET", cache: "no-store" });
-    if (!res.ok) return null;
-    const json = await res.json();
-    if (!json || typeof json !== "object") return null;
-    if (Number(json.status) === 0) return null;
-    const prod = json.product && typeof json.product === "object" ? json.product : null;
-    return prod ? prod : null;
-  };
+    const cache = ensureLookupCache(state);
+    const cached = cache[code];
+    if (cached && typeof cached === "object" && (cached.name || (cached.amount && cached.unit))) return cached;
 
-  const tryV0 = async (base0) => {
-    const url0 = `${base0}${encodeURIComponent(code)}.json`;
-    const res0 = await fetch(url0, { method: "GET", cache: "no-store" });
-    if (!res0.ok) return null;
-    const j0 = await res0.json();
-    if (!j0 || typeof j0 !== "object") return null;
-    if (Number(j0.status) === 0) return null;
-    const prod0 = j0.product && typeof j0.product === "object" ? j0.product : null;
-    return prod0 ? prod0 : null;
-  };
+    const withTimeout = async (url, ms = 7000) => {
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const t = ctrl ? setTimeout(() => ctrl.abort(), ms) : null;
+      try {
+        return await fetch(url, { method: "GET", cache: "no-store", signal: ctrl?.signal });
+      } finally {
+        if (t) clearTimeout(t);
+      }
+    };
 
-  try {
-    let prod = await tryV2(OFF_BASE);
-    if (!prod) prod = await tryV2(OFF_BASE_FALLBACK);
-    if (!prod) prod = await tryV0(OFF_BASE_V0);
-    if (!prod) prod = await tryV0(OFF_BASE_V0_FALLBACK);
-    if (!prod) return null;
+    const parseProductToSuggestion = (prod) => {
+      if (!prod || typeof prod !== "object") return null;
 
-    const name = String(prod.product_name_de || prod.product_name || "").trim();
-    const brands = String(prod.brands || "").trim();
+      const name = String(prod.product_name_de || prod.product_name || "").trim();
+      const brands = String(prod.brands || "").trim();
 
-    let parsed = null;
-    if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(prod.product_quantity, prod.product_quantity_unit);
-    if (!parsed && prod.quantity) parsed = parseQuantityString(prod.quantity);
+      let parsed = null;
+      if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(prod.product_quantity, prod.product_quantity_unit);
+      if (!parsed && prod.quantity) parsed = parseQuantityString(prod.quantity);
 
-    const out = {
-      name: name || "",
-      brands: brands || "",
-      amount: parsed?.amount ? Math.round(parsed.amount * 100) / 100 : null,
-      unit: parsed?.unit || "",
-      rawQuantity: String(prod.quantity || "").trim(),
-      nutriments: (() => {
+      const preferMl = (parsed?.unit || "") === "ml";
+
+      const ingredientsText = String(
+        prod.ingredients_text_de ||
+        prod.ingredients_text_with_allergens_de ||
+        prod.ingredients_text ||
+        prod.ingredients_text_with_allergens ||
+        ""
+      ).trim();
+
+      const allergens = String(prod.allergens || "").trim();
+
+      const nutriments = (() => {
         const nutr = prod.nutriments && typeof prod.nutriments === "object" ? prod.nutriments : null;
-        const preferMl = (parsed?.unit || "") === "ml";
         const kcal = round1(pickKcal(nutr, preferMl));
         const protein = round1(pickNutri(nutr, "proteins", preferMl));
         const carbs = round1(pickNutri(nutr, "carbohydrates", preferMl));
@@ -238,18 +250,91 @@ async function fetchOffSuggestion(state, persist, barcode) {
         const sugar = round1(pickNutri(nutr, "sugars", preferMl));
         const fiber = round1(pickNutri(nutr, "fiber", preferMl));
         const salt = round1(pickNutri(nutr, "salt", preferMl));
-        return { kcal, protein, carbs, fat, sugar, fiber, salt };
-      })()
+        if (kcal === null && protein === null && carbs === null && fat === null && sugar === null && fiber === null && salt === null) return null;
+        return {
+          base: preferMl ? "100ml" : "100g",
+          kcalPer100: kcal,
+          proteinPer100: protein,
+          carbsPer100: carbs,
+          fatPer100: fat,
+          sugarPer100: sugar,
+          fiberPer100: fiber,
+          saltPer100: salt
+        };
+      })();
+
+      return {
+        name: name || "",
+        brands: brands || "",
+        amount: parsed?.amount ? Math.round(parsed.amount * 100) / 100 : null,
+        unit: parsed?.unit || "",
+        rawQuantity: String(prod.quantity || "").trim(),
+        nutriments,
+        ingredientsText,
+        allergens,
+        fetchedAt: new Date().toISOString()
+      };
     };
 
-    cache[code] = out;
-    persist();
-    return out;
-  } catch (e) {
-    console.warn("[OFF] lookup failed", code, e);
+    // Wir probieren bewusst mehrere Endpoints, weil manche Kombinationen (CORS/Rate-Limits)
+    // je nach Netzwerk/Browser unterschiedlich reagieren können.
+    const params = `fields=${encodeURIComponent(OFF_FIELDS)}&lc=de&cc=de`;
+    const urls = [
+      // v2 (primär)
+      `${OFF_BASE}${encodeURIComponent(code)}?${params}`,
+      // v2 alternative (manche Deployments erwarten .json)
+      `${OFF_BASE}${encodeURIComponent(code)}.json?${params}`,
+      // v0 Fallbacks
+      `${OFF_BASE_V0}${encodeURIComponent(code)}.json`,
+      `${OFF_BASE_V0_DE}${encodeURIComponent(code)}.json`
+    ];
+
+    let sawHardError = false;
+    for (const url of urls) {
+      try {
+        const res = await withTimeout(url);
+        if (!res || !("ok" in res)) {
+          sawHardError = true;
+          continue;
+        }
+
+        // Nicht „Product nicht vorhanden“ mit „Netz/CORS“ verwechseln.
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) {
+            lastOffError = `API blockiert (${res.status})`;
+            sawHardError = true;
+          } else if (res.status === 429) {
+            lastOffError = "Zu viele Anfragen (429)";
+            sawHardError = true;
+          } else if (res.status >= 500) {
+            lastOffError = `Serverfehler (${res.status})`;
+            sawHardError = true;
+          }
+          continue;
+        }
+
+        const json = await res.json();
+        if (!json || typeof json !== "object") continue;
+        if (json.status === 0) continue;
+
+        const prod = json.product && typeof json.product === "object" ? json.product : null;
+        const out = parseProductToSuggestion(prod);
+        if (!out) continue;
+
+        cache[code] = out;
+        if (typeof persist === "function") persist();
+        return out;
+      } catch (err) {
+        // Typischerweise TypeError (CORS/Netz) oder AbortError (Timeout)
+        lastOffError = (String(err?.name || "").toLowerCase().includes("abort")) ? "Timeout" : "Netz/CORS";
+        sawHardError = true;
+      }
+    }
+
+    // Wenn wir harte Errors gesehen haben, merken wir uns das – UI kann das anzeigen.
+    if (!sawHardError) lastOffError = "";
     return null;
   }
-}
 
   const ui = {
     openIngredientMenus: new Set(),
@@ -704,7 +789,11 @@ modal.addEventListener("click", (e) => {
               setNextLabel("Übernehmen");
             } else {
               setResult(code, null, null, false);
-              setMsg(`Unbekannt: ${code}`, "ok");
+              if (lastOffError) {
+                setMsg(`Open Food Facts nicht erreichbar (${lastOffError}). Manuell eingeben.`, "warn");
+              } else {
+                setMsg(`Unbekannt: ${code}`, "ok");
+              }
               setNextLabel("Zutat anlegen");
             }
             setNextEnabled(true);
@@ -774,7 +863,15 @@ modal.addEventListener("click", (e) => {
           return;
         }
 
-        openIngredientModal(state, persist, null, { prefillBarcode: code, prefillName: offSuggestion?.name || "", prefillAmount: offSuggestion?.amount || "", prefillUnit: offSuggestion?.unit || "", prefillBrands: offSuggestion?.brands || "", prefillNutriments: offSuggestion?.nutriments || null });
+        openIngredientModal(state, persist, null, {
+          prefillBarcode: code,
+          prefillName: offSuggestion?.name || "",
+          prefillAmount: offSuggestion?.amount || "",
+          prefillUnit: offSuggestion?.unit || "",
+          prefillBrands: offSuggestion?.brands || "",
+          prefillNutriments: offSuggestion?.nutriments || null,
+          prefillIngredientsText: offSuggestion?.ingredientsText || ""
+        });
       }
     });
 
@@ -1058,6 +1155,13 @@ modal.addEventListener("click", (e) => {
           </div>
         </div>
       </details>
+
+      <details class="nutri-details" style="margin-top:12px;">
+        <summary class="small">Inhaltsstoffe (optional)</summary>
+        <div class="small muted2" style="margin-top:6px;">Wird (wenn vorhanden) automatisch aus Open Food Facts übernommen.</div>
+        <textarea id="i-ingredientsText" rows="4" placeholder="z. B. Zutatenliste…">${esc(isEdit ? (ingOrNull?.ingredientsText || "") : (opts?.prefillIngredientsText || ""))}</textarea>
+        <div class="small muted2" style="margin-top:6px;">Hinweis: Dieser Text ist optional und kann auch leer bleiben.</div>
+      </details>
 <div class="small" id="i-msg" style="margin-top:10px; color: rgba(239,68,68,0.9);"></div>
     `;
 
@@ -1088,6 +1192,8 @@ modal.addEventListener("click", (e) => {
         const protein = toNum(m.querySelector("#i-protein")?.value);
         const carbs = toNum(m.querySelector("#i-carbs")?.value);
         const fat = toNum(m.querySelector("#i-fat")?.value);
+
+        const ingredientsText = (m.querySelector("#i-ingredientsText")?.value || "").trim();
 
         const categoryId = (m.querySelector("#i-cat")?.value || "").trim() || null;
         const unlisted = !!m.querySelector("#i-unlisted")?.checked;
@@ -1133,6 +1239,8 @@ modal.addEventListener("click", (e) => {
           it.shelfLifeDays = shelf;
           it.nutriments = nutriments || null;
 
+          it.ingredientsText = ingredientsText;
+
           it.categoryId = categoryId;
           it.unlisted = unlisted;
 
@@ -1154,6 +1262,8 @@ modal.addEventListener("click", (e) => {
           price: Number(((priceVal ?? 0) || 0).toFixed(2)),
           shelfLifeDays: shelf,
           nutriments: nutriments || null,
+
+          ingredientsText,
 
           categoryId,
           unlisted

@@ -26,16 +26,7 @@
 
   function persist({ renderNow = false } = {}) {
     const saved = saveState(state);
-
-    // IMPORTANT: keep the same object reference for all views/modules.
-    // Many modules hold on to `state` from their initial render call.
-    // If we replace `state` with a new object, their updates go into a stale object and get lost.
-    if (saved && saved !== state) {
-      // wipe & re-assign (preserve reference)
-      for (const k of Object.keys(state)) delete state[k];
-      Object.assign(state, saved);
-    }
-
+    if (saved) state = saved;
     applyThemeFromState();
     if (renderNow) render(currentView);
     return state;
@@ -132,17 +123,35 @@
       try {
         const reg = await navigator.serviceWorker.register("./service-worker.js");
 
+        // 0.4.x: Beim Öffnen/Neuladen immer aktiv nach Updates suchen.
+        // (ohne lokale Daten anzufassen – nur App-Shell/Cache)
+        try { await reg.update(); } catch {}
+
+        // Wenn schon ein Update wartet, sofort aktivieren.
+        if (reg.waiting) {
+          reg.waiting.postMessage({ type: "SKIP_WAITING" });
+        }
+
+        // Wenn der Controller wechselt (neuer SW aktiv), einmal hart neu laden.
+        // So bekommst du garantiert den neuen Code, ohne „Website-Daten löschen“.
+        let refreshing = false;
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (refreshing) return;
+          refreshing = true;
+          window.location.reload();
+        });
+
         // Update-Hinweis (wenn schon eine Version läuft und eine neue installiert wurde)
         reg.addEventListener("updatefound", () => {
           const sw = reg.installing;
           if (!sw) return;
           sw.addEventListener("statechange", () => {
             if (sw.state === "installed" && navigator.serviceWorker.controller) {
-              window.ui?.toast?.("Update verfügbar", {
-                actionText: "Neu laden",
-                onAction: () => window.location.reload(),
-                timeoutMs: 12000,
-              });
+              // Auto-Update: direkt aktivieren (der controllerchange triggert den Reload)
+              try {
+                reg.waiting?.postMessage?.({ type: "SKIP_WAITING" });
+              } catch {}
+              window.ui?.toast?.("Update wird aktiviert…", { timeoutMs: 2500 });
             }
           });
         });
