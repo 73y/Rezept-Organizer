@@ -66,6 +66,8 @@
     const report = typeof window.getStorageReport === "function" ? window.getStorageReport() : { status: "ok" };
     const dt = window.dataTools || {};
 
+    const meta = window.APP_META || { version: "v0.0.0", buildId: "0", cacheName: "" };
+
     const auditReport = typeof dt.getAuditReport === "function" ? dt.getAuditReport() : null;
 
     const hasRestore = typeof dt.hasRestorePoint === "function" ? dt.hasRestorePoint() : false;
@@ -75,7 +77,6 @@
       <div class="card">
         <h2 style="margin:0 0 6px 0;">Einstellungen</h2>
         <p class="small" style="margin:0;">Darstellung, Kochen, Daten-Tools und Verwaltung von Logs.</p>
-        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>v0.4.23-20260220152915</b></p>
       </div>
 
       <div class="card">
@@ -164,7 +165,52 @@
           Import/Export arbeitet lokal im Browser. Export enthält automatisch Metadaten (App + Datum), Import akzeptiert beides: <b>Wrapper</b> oder <b>reinen State</b>.
         </div>
       </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 10px 0;">Über diese App</h3>
+
+        <div class="small" style="line-height:1.6;">
+          <div>App-Version: <b>${esc(meta.version)}</b></div>
+          <div>Build-ID: <b>${esc(meta.buildId)}</b></div>
+          <div>Service-Worker Cache: <b id="sw-cache-name">${esc(meta.cacheName || "—")}</b></div>
+          <div>Update-Status: <b id="sw-update-status">prüfe…</b></div>
+        </div>
+
+        <div class="small" style="margin-top:10px; opacity:0.8;">
+          Tipp: Wenn hier „Update verfügbar“ steht, einmal neu laden – dann ist garantiert alles frisch.
+        </div>
+      </div>
     `;
+
+    // SW/Update-Status (asynchron nachziehen)
+    (async () => {
+      const elStatus = container.querySelector("#sw-update-status");
+      const elCache = container.querySelector("#sw-cache-name");
+      if (!elStatus) return;
+      try {
+        if (!("serviceWorker" in navigator)) {
+          elStatus.textContent = "Service Worker nicht aktiv";
+          return;
+        }
+        const reg = await navigator.serviceWorker.getRegistration("./");
+        if (!reg) {
+          elStatus.textContent = "nicht registriert";
+          return;
+        }
+
+        // waiting = Update liegt bereit, wird nach Reload aktiv
+        if (reg.waiting) {
+          elStatus.textContent = "Update verfügbar";
+        } else {
+          elStatus.textContent = "Up to date";
+        }
+
+        // Cache-Name aus APP_META ist der Ziel-Cache. Ob der aktiv ist, hängt vom Reload ab.
+        if (elCache && meta.cacheName) elCache.textContent = meta.cacheName;
+      } catch (e) {
+        elStatus.textContent = "Status unbekannt";
+      }
+    })();
 
     if (container.__settingsBound) return;
     container.__settingsBound = true;

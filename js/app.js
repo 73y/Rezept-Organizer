@@ -2,12 +2,12 @@
   const VIEWS = ["dashboard", "inventory", "ingredients", "recipes", "shopping", "stats", "settings", "purchaselog", "cookhistory"];
   let currentView = "dashboard";
   let state = null;
-  window.__BUILD = "v0.4.24-20260220140000";
+  const APP_META = window.APP_META || { version: "v0.0.0", buildId: "0", cacheName: "" };
 
   function setBuildTagStatus(suffix) {
     const el = document.querySelector('.build-tag');
     if (!el) return;
-    const base = (el.textContent || '').split('•')[0].trim() || window.__BUILD.split('-')[0];
+    const base = (APP_META.version || "v0.0.0").trim();
     el.textContent = suffix ? `${base} • ${suffix}` : base;
   }
 
@@ -121,6 +121,9 @@
   };
 
   document.addEventListener("DOMContentLoaded", () => {
+    // Einheitliche Version-Anzeige (Header)
+    setBuildTagStatus("");
+
     state = loadState();
     applyThemeFromState();
 

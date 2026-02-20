@@ -1,6 +1,9 @@
 /* service-worker.js */
-// IMPORTANT: bump this on every deploy so old caches are purged reliably.
-const CACHE_NAME = "einkauf-rezepte-pwa-20260220140000";
+// Zentrale Build-/Versions-Infos einlesen (gleiche Quelle wie die App)
+try { importScripts("./js/appMeta.js"); } catch {}
+
+// IMPORTANT: bump happens via APP_META.buildId
+const CACHE_NAME = (self.APP_META && self.APP_META.cacheName) ? self.APP_META.cacheName : "einkauf-rezepte-pwa-fallback";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -8,6 +11,7 @@ const APP_SHELL = [
   "./manifest.webmanifest",
   "./offline.html",
   "./service-worker.js",
+  "./js/appMeta.js",
   "./js/storage.js",
   "./js/models.js",
   "./js/utils.js",
