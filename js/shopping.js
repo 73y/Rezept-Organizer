@@ -12,24 +12,36 @@
   const clone = (obj) => (window.utils?.clone ? window.utils.clone(obj) : JSON.parse(JSON.stringify(obj)));
 
   const cleanBarcode = (raw) => String(raw ?? "").replace(/\D+/g, "").trim();
+  function offDebugLineFromState(state) {
+    const dbg = state?.__debug?.lastOff;
+    if (!dbg) return null;
 
+    const tries = Array.isArray(dbg.tries) ? dbg.tries : [];
+    const parts = tries.map((t) => {
+      let host = "?";
+      try { host = new URL(t.url).host; } catch {}
+      let s = host;
 
-  function offDebugLineFromState(state, code) {
-    try {
-      const dbg = state?.__debug?.lastOff;
-      const c = cleanBarcode(code);
-      if (!dbg || !c || String(dbg.code || "") !== String(c)) return "";
-      const tries = Array.isArray(dbg.tries) ? dbg.tries : [];
-      const parts = tries.map((t) => {
-        let host = "";
-        try { host = new URL(t.url).host; } catch {}
-        const status = t.status ? `HTTP ${t.status}` : "";
-        const note = String(t.note || "").trim();
-        const ok = t.ok ? "ok" : "";
-        return [host, status, note, ok].filter(Boolean).join(" ");
-      }).filter(Boolean);
-      return parts.join(" | ").slice(0, 220);
-    } catch { return ""; }
+      if (Number.isFinite(t.status)) s += ` HTTP ${t.status}`;
+      if (Number.isFinite(t.jsonStatus)) s += ` status=${t.jsonStatus}`;
+      const sv = String(t.statusVerbose || "").trim();
+      if (sv) s += ` ${sv}`;
+
+      // show a short product name if we have one and no verbose status
+      const pn = String(t.productName || "").trim();
+      if (pn && !sv) s += ` name=${pn.slice(0, 28)}`;
+
+      const note = String(t.note || "").trim();
+      if (note) s += ` (${note.slice(0, 60)})`;
+
+      return s.trim();
+    });
+
+    const res = String(dbg.result || "").toUpperCase();
+    const bestName = String(dbg.best?.name || "").trim();
+    const head = res ? `${res}${bestName ? `: ${bestName.slice(0, 40)}` : ""} — ` : "";
+
+    return (head + parts.join(" | ")).slice(0, 260);
   }
 
   function offDebugHtml(state, code) {
@@ -806,49 +818,134 @@ modal.modal.addEventListener("change", (ev) => {
 
     return null;
   }
-
-  async function fetchOffSuggestion(state, persist, code) {
-    const c = cleanBarcode(code);
-    if (!c) return null;
-
-    // simple validity: EAN/UPC/GTIN lengths
-    if (![8, 12, 13, 14].includes(c.length)) return null;
+  async function fetchOffSuggestion(state, persist, barcode) {
+    const code = cleanBarcode(barcode);
+    if (!isValidBarcode(code)) return null;
 
     const cache = ensureBarcodeCache(state);
-    const cached = cache[c];
-    if (cached && typeof cached === "object" && (cached.name || (cached.amount && cached.unit))) return cached;
+    const cached = cache[code];
+    if (cached && typeof cached === "object" && (cached.name || cached.ingredientsText || (cached.amount && cached.unit))) return cached;
 
     const debug = (state.__debug ||= {});
-    debug.lastOff = { code: c, at: new Date().toISOString(), tries: [], result: "" };
-
-    const OFF_FIELDS = "product_name,product_name_de,generic_name,quantity,product_quantity,product_quantity_unit,brands,nutriments,ingredients_text,ingredients_text_de";
-    const V2_NET = "https://world.openfoodfacts.net/api/v2/product/";
-    const V2_ORG = "https://world.openfoodfacts.org/api/v2/product/";
-    const V0_NET = "https://world.openfoodfacts.net/api/v0/product/";
-    const V0_ORG = "https://world.openfoodfacts.org/api/v0/product/";
-
-    const fetchWithTimeout = async (url, ms) => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), ms);
-      try {
-        return await fetch(url, { method: "GET", signal: ctrl.signal });
-      } finally {
-        clearTimeout(t);
-      }
-    };
+    debug.lastOff = { code, at: new Date().toISOString(), result: "miss", best: null, tries: [] };
 
     const tryJson = async (url) => {
-      const entry = { url, ok: false, status: null, note: "" };
+      const entry = { url, ok: false, status: null, ct: "", jsonStatus: null, statusVerbose: "", productName: "", note: "" };
       debug.lastOff.tries.push(entry);
       try {
-        const res = await fetchWithTimeout(url, 9000);
+        const res = await fetch(url, { method: "GET" });
         entry.status = res.status;
+        entry.ct = (res.headers.get("content-type") || "").toLowerCase();
 
-        const ct = (res.headers.get("content-type") || "").toLowerCase();
         if (!res.ok) {
           entry.note = `HTTP ${res.status}`;
           return null;
         }
+        if (!entry.ct.includes("application/json")) {
+          entry.note = `content-type ${entry.ct || "?"}`;
+          return null;
+        }
+
+        const json = await res.json();
+        entry.ok = true;
+
+        const js = json && typeof json === "object" ? json : null;
+        entry.jsonStatus = typeof js?.status === "number" ? js.status : null;
+        entry.statusVerbose = String(js?.status_verbose || "").trim();
+
+        const prod = js?.product && typeof js.product === "object" ? js.product : null;
+        const pn = prod ? (prod.product_name_de || prod.product_name || prod.generic_name || "") : "";
+        entry.productName = String(pn || "").trim();
+
+        // OFF can return HTTP 200 but status=0 ("product not found") or other non-hit states.
+        if (entry.jsonStatus === 0) {
+          entry.note = `status=0 ${entry.statusVerbose || ""}`.trim();
+          return null;
+        }
+        if (!prod) {
+          entry.note = entry.note ? `${entry.note} | no product` : "no product";
+          return null;
+        }
+
+        return js;
+      } catch (e) {
+        entry.note = String(e?.message || e || "fetch failed");
+        return null;
+      }
+    };
+
+    const toText = (v) => {
+      if (v == null) return "";
+      if (typeof v === "string") return v;
+      if (typeof v === "number") return String(v);
+      if (Array.isArray(v)) return toText(v[0]);
+      if (typeof v === "object") return String(v.text || v.value || v.name || "");
+      return String(v);
+    };
+
+    const parseProd = (prod) => {
+      if (!prod || typeof prod !== "object") return null;
+
+      const name = toText(prod.product_name_de || prod.product_name || prod.generic_name || "").trim();
+      const brands = toText(prod.brands || "").trim();
+
+      // quantity
+      let parsed = null;
+      if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(`${prod.product_quantity}${prod.product_quantity_unit}`);
+      if (!parsed && prod.quantity) parsed = parseQuantityString(toText(prod.quantity));
+
+      const ingredientsText = toText(prod.ingredients_text_de || prod.ingredients_text || "").trim();
+
+      const nutriments = prod.nutriments && typeof prod.nutriments === "object" ? prod.nutriments : null;
+
+      if (!name && !brands && !parsed && !nutriments && !ingredientsText) return null;
+
+      return {
+        name: name || "",
+        brands: brands || "",
+        ingredientsText: ingredientsText || "",
+        amount: parsed?.amount ? Math.round(parsed.amount * 100) / 100 : null,
+        unit: parsed?.unit || "",
+        rawQuantity: toText(prod.quantity || "").trim(),
+        nutriments,
+        fetchedAt: new Date().toISOString()
+      };
+    };
+
+    // IMPORTANT: use production (.org) first. The .net domain is staging and may behave differently / require auth.
+    const urls = [
+      `${OFF_V2_ORG}${encodeURIComponent(code)}?fields=${encodeURIComponent(OFF_FIELDS)}&lc=de&cc=de`,
+      `${OFF_V0_ORG}${encodeURIComponent(code)}.json`,
+      `${OFF_V2_NET}${encodeURIComponent(code)}?fields=${encodeURIComponent(OFF_FIELDS)}&lc=de&cc=de`,
+      `${OFF_V0_NET}${encodeURIComponent(code)}.json`
+    ];
+
+    for (const url of urls) {
+      const json = await tryJson(url);
+      if (!json || typeof json !== "object") continue;
+
+      const prod = json.product && typeof json.product === "object" ? json.product : null;
+      const out = parseProd(prod);
+
+      // If OFF returned a product but we can't map any useful fields, keep trying fallbacks and show a note.
+      if (!out || !(out.name || out.ingredientsText || (out.amount && out.unit) || out.nutriments)) {
+        const last = debug.lastOff.tries[debug.lastOff.tries.length - 1];
+        if (last && last.ok && !last.note) last.note = "product present but mapping empty";
+        continue;
+      }
+
+      cache[code] = out;
+      debug.lastOff.result = "hit";
+      debug.lastOff.best = { name: out.name || "", brands: out.brands || "", amount: out.amount || null, unit: out.unit || "" };
+
+      if (typeof persist === "function") persist();
+      return out;
+    }
+
+    debug.lastOff.result = "miss";
+    if (typeof persist === "function") persist();
+    return null;
+  }
         if (!ct.includes("application/json")) {
           entry.note = `content-type ${ct || "?"}`;
           return null;
@@ -1245,8 +1342,14 @@ ${offDebugHtml(state, code)}
         try { cur.offName = offNameTmp; } catch {}
       }
 
+      // Fast path: if Open Food Facts returned usable data, open the create-modal directly.
+      // (Still "unknown" locally until you save it as an ingredient.)
+      if (offTmp && (offTmp.name || offTmp.ingredientsText || (offTmp.amount && offTmp.unit) || offTmp.nutriments)) {
+        msgEl.textContent = "Open Food Facts: Produkt gefunden – bitte bestätigen.";
+        try { await createAndAssignNew(code); return; } catch {}
+      }
 
-      const sug = suggestIngredientsByName(state, (cur.offName || cur.rawName || ""), 3);
+const sug = suggestIngredientsByName(state, (cur.offName || cur.rawName || ""), 3);
       const sugRows = sug.length
         ? sug.map((x) => `
             <button data-action="assignIng" data-ingredient-id="${esc(x.ing.id)}" data-code="${esc(code)}" style="text-align:left;">

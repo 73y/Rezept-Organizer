@@ -178,34 +178,57 @@
     return null;
   }
 
-  async function fetchOffSuggestion(state, persist, barcode) {
+    async function fetchOffSuggestion(state, persist, barcode) {
     const code = cleanBarcode(barcode);
     if (!isValidBarcode(code)) return null;
 
     const cache = ensureLookupCache(state);
     const cached = cache[code];
-    if (cached && typeof cached === "object" && (cached.name || (cached.amount && cached.unit))) return cached;
+    if (cached && typeof cached === "object" && (cached.name || cached.ingredientsText || (cached.amount && cached.unit))) return cached;
 
     const debug = (state.__debug ||= {});
-    debug.lastOff = { code, at: new Date().toISOString(), tries: [] };
+    debug.lastOff = { code, at: new Date().toISOString(), result: "miss", best: null, tries: [] };
 
-    const tryJson = async (url) => {
-      const entry = { url, ok: false, status: null, note: "" };
+    const tryFetch = async (url, asJson) => {
+      const entry = { url, ok: false, status: null, ct: "", jsonStatus: null, statusVerbose: "", productName: "", note: "" };
       debug.lastOff.tries.push(entry);
+
       try {
         const res = await fetch(url, { method: "GET" });
         entry.status = res.status;
-        const ct = (res.headers.get("content-type") || "").toLowerCase();
+        entry.ct = (res.headers.get("content-type") || "").toLowerCase();
+
         if (!res.ok) {
           entry.note = `HTTP ${res.status}`;
           return null;
         }
-        if (!ct.includes("application/json")) {
-          entry.note = `content-type ${ct || "?"}`;
+
+        if (!asJson) return await res.text();
+
+        if (!entry.ct.includes("application/json")) {
+          entry.note = `content-type ${entry.ct || "?"}`;
           return null;
         }
+
         const json = await res.json();
         entry.ok = true;
+
+        entry.jsonStatus = typeof json?.status === "number" ? json.status : null;
+        entry.statusVerbose = String(json?.status_verbose || "").trim();
+
+        const prod = json?.product && typeof json.product === "object" ? json.product : null;
+        const pn = prod ? (prod.product_name_de || prod.product_name || prod.generic_name || "") : "";
+        entry.productName = String(pn || "").trim();
+
+        if (entry.jsonStatus === 0) {
+          entry.note = `status=0 ${entry.statusVerbose || ""}`.trim();
+          return null;
+        }
+        if (!prod) {
+          entry.note = entry.note ? `${entry.note} | no product` : "no product";
+          return null;
+        }
+
         return json;
       } catch (e) {
         entry.note = String(e?.message || e || "fetch failed");
@@ -216,73 +239,61 @@
     const parseProd = (prod) => {
       if (!prod || typeof prod !== "object") return null;
 
-      const name = String(prod.product_name_de || prod.product_name || "").trim();
+      const name = String(prod.product_name_de || prod.product_name || prod.generic_name || "").trim();
       const brands = String(prod.brands || "").trim();
 
       let parsed = null;
-      if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(prod.product_quantity, prod.product_quantity_unit);
-      if (!parsed && prod.quantity) parsed = parseQuantityString(prod.quantity);
+      if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(`${prod.product_quantity}${prod.product_quantity_unit}`);
+      if (!parsed && prod.quantity) parsed = parseQuantityString(String(prod.quantity));
 
-      const ingText = String(prod.ingredients_text_de || prod.ingredients_text || "").trim();
+      const ingredientsText = String(prod.ingredients_text_de || prod.ingredients_text || "").trim();
+      const nutriments = prod.nutriments && typeof prod.nutriments === "object" ? prod.nutriments : null;
 
-      const nutr = prod.nutriments && typeof prod.nutriments === "object" ? prod.nutriments : null;
-      const preferMl = (parsed?.unit || "") === "ml";
-      const kcal = round1(pickKcal(nutr, preferMl));
-      const protein = round1(pickNutri(nutr, "proteins", preferMl));
-      const carbs = round1(pickNutri(nutr, "carbohydrates", preferMl));
-      const fat = round1(pickNutri(nutr, "fat", preferMl));
-      const sugar = round1(pickNutri(nutr, "sugars", preferMl));
-      const fiber = round1(pickNutri(nutr, "fiber", preferMl));
-      const salt = round1(pickNutri(nutr, "salt", preferMl));
-
-      const nutrimentsOut =
-        (kcal === null && protein === null && carbs === null && fat === null && sugar === null && fiber === null && salt === null)
-          ? null
-          : {
-              base: preferMl ? "100ml" : "100g",
-              kcalPer100: kcal,
-              proteinPer100: protein,
-              carbsPer100: carbs,
-              fatPer100: fat,
-              sugarPer100: sugar,
-              fiberPer100: fiber,
-              saltPer100: salt
-            };
+      if (!name && !brands && !parsed && !nutriments && !ingredientsText) return null;
 
       return {
         name: name || "",
         brands: brands || "",
-        ingredientsText: ingText || "",
+        ingredientsText: ingredientsText || "",
         amount: parsed?.amount ? Math.round(parsed.amount * 100) / 100 : null,
         unit: parsed?.unit || "",
         rawQuantity: String(prod.quantity || "").trim(),
-        nutriments: nutrimentsOut,
+        nutriments,
         fetchedAt: new Date().toISOString()
       };
     };
 
+    // IMPORTANT: use production (.org) first. The .net domain is staging and may behave differently / require auth.
     const urls = [
-      `${OFF_BASE}${encodeURIComponent(code)}?fields=${OFF_FIELDS}`,
-      `${OFF_BASE_FALLBACK}${encodeURIComponent(code)}?fields=${OFF_FIELDS}`,
-      `${OFF_V0_NET}${encodeURIComponent(code)}.json`,
-      `${OFF_V0_ORG}${encodeURIComponent(code)}.json`
+      `${OFF_BASE_FALLBACK}${encodeURIComponent(code)}?fields=${encodeURIComponent(OFF_FIELDS)}&lc=de&cc=de`,
+      `${OFF_V0_FALLBACK}${encodeURIComponent(code)}.json`,
+      `${OFF_BASE}${encodeURIComponent(code)}?fields=${encodeURIComponent(OFF_FIELDS)}&lc=de&cc=de`,
+      `${OFF_V0}${encodeURIComponent(code)}.json`
     ];
 
     for (const url of urls) {
-      const json = await tryJson(url);
+      const json = await tryFetch(url, true);
       if (!json || typeof json !== "object") continue;
 
-      // v2/v0 shape
-      if (json.status === 0) continue;
       const prod = json.product && typeof json.product === "object" ? json.product : null;
       const out = parseProd(prod);
-      if (out && (out.name || out.ingredientsText || (out.amount && out.unit))) {
-        cache[code] = out;
-        if (typeof persist === "function") persist();
-        return out;
+
+      if (!out || !(out.name || out.ingredientsText || (out.amount && out.unit) || out.nutriments)) {
+        const last = debug.lastOff.tries[debug.lastOff.tries.length - 1];
+        if (last && last.ok && !last.note) last.note = "product present but mapping empty";
+        continue;
       }
+
+      cache[code] = out;
+      debug.lastOff.result = "hit";
+      debug.lastOff.best = { name: out.name || "", brands: out.brands || "", amount: out.amount || null, unit: out.unit || "" };
+
+      if (typeof persist === "function") persist();
+      return out;
     }
 
+    debug.lastOff.result = "miss";
+    if (typeof persist === "function") persist();
     return null;
   }
 
