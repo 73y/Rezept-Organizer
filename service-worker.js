@@ -1,5 +1,5 @@
 /* service-worker.js */
-const CACHE_NAME = "einkauf-rezepte-pwa-20260220124000";
+const CACHE_NAME = "einkauf-rezepte-pwa-20260220140000";
 const APP_SHELL = [
   "./",
   "./index.html",

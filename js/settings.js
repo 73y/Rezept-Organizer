@@ -75,7 +75,7 @@
       <div class="card">
         <h2 style="margin:0 0 6px 0;">Einstellungen</h2>
         <p class="small" style="margin:0;">Darstellung, Kochen, Daten-Tools und Verwaltung von Logs.</p>
-        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>v0.4.19-20260220123000</b></p>
+        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>v0.4.21-20260220140000</b></p>
       </div>
 
       <div class="card">
