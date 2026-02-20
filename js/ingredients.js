@@ -96,8 +96,11 @@
 
 
   // Open Food Facts Autofill (Barcode -> Name/Packung)
-  const OFF_FIELDS = "product_name,product_name_de,quantity,product_quantity,product_quantity_unit,brands,nutriments";
-  const OFF_BASE = "https://world.openfoodfacts.org/api/v2/product/";
+  const OFF_FIELDS = "code,product_name,product_name_de,quantity,product_quantity,product_quantity_unit,brands,nutriments";
+  const OFF_BASE = "https://world.openfoodfacts.net/api/v2/product/";
+  const OFF_BASE_FALLBACK = "https://world.openfoodfacts.org/api/v2/product/";
+  const OFF_BASE_V0 = "https://world.openfoodfacts.net/api/v0/product/";
+  const OFF_BASE_V0_FALLBACK = "https://world.openfoodfacts.org/api/v0/product/";
 
   function ensureLookupCache(state) {
     if (!state || typeof state !== "object") return {};
@@ -175,71 +178,78 @@
     return null;
   }
 
-  async function fetchOffSuggestion(state, persist, barcode) {
-    const code = cleanBarcode(barcode);
-    if (!isValidBarcode(code)) return null;
+async function fetchOffSuggestion(state, persist, barcode) {
+  const code = cleanBarcode(barcode);
+  if (!isValidBarcode(code)) return null;
 
-    const cache = ensureLookupCache(state);
-    const cached = cache[code];
-    if (cached && typeof cached === "object" && (cached.name || (cached.amount && cached.unit))) return cached;
+  const cache = ensureLookupCache(state);
+  const cached = cache[code];
+  if (cached && typeof cached === "object" && (cached.name || (cached.amount && cached.unit))) return cached;
 
-    try {
-      const url = `${OFF_BASE}${encodeURIComponent(code)}?fields=${OFF_FIELDS}`;
-      const res = await fetch(url, { method: "GET" });
-      if (!res.ok) return null;
-      const json = await res.json();
+  const tryV2 = async (base) => {
+    const url = `${base}${encodeURIComponent(code)}?fields=${OFF_FIELDS}&lc=de&cc=de`;
+    const res = await fetch(url, { method: "GET", cache: "no-store" });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json || typeof json !== "object") return null;
+    if (Number(json.status) === 0) return null;
+    const prod = json.product && typeof json.product === "object" ? json.product : null;
+    return prod ? prod : null;
+  };
 
-      if (!json || typeof json !== "object") return null;
-      if (json.status === 0) return null;
+  const tryV0 = async (base0) => {
+    const url0 = `${base0}${encodeURIComponent(code)}.json`;
+    const res0 = await fetch(url0, { method: "GET", cache: "no-store" });
+    if (!res0.ok) return null;
+    const j0 = await res0.json();
+    if (!j0 || typeof j0 !== "object") return null;
+    if (Number(j0.status) === 0) return null;
+    const prod0 = j0.product && typeof j0.product === "object" ? j0.product : null;
+    return prod0 ? prod0 : null;
+  };
 
-      const prod = json.product && typeof json.product === "object" ? json.product : null;
-      if (!prod) return null;
+  try {
+    let prod = await tryV2(OFF_BASE);
+    if (!prod) prod = await tryV2(OFF_BASE_FALLBACK);
+    if (!prod) prod = await tryV0(OFF_BASE_V0);
+    if (!prod) prod = await tryV0(OFF_BASE_V0_FALLBACK);
+    if (!prod) return null;
 
-      const name = String(prod.product_name_de || prod.product_name || "").trim();
-      const brands = String(prod.brands || "").trim();
+    const name = String(prod.product_name_de || prod.product_name || "").trim();
+    const brands = String(prod.brands || "").trim();
 
-      let parsed = null;
-      if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(prod.product_quantity, prod.product_quantity_unit);
-      if (!parsed && prod.quantity) parsed = parseQuantityString(prod.quantity);
+    let parsed = null;
+    if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(prod.product_quantity, prod.product_quantity_unit);
+    if (!parsed && prod.quantity) parsed = parseQuantityString(prod.quantity);
 
-      const out = {
-        name: name || "",
-        brands: brands || "",
-        amount: parsed?.amount ? Math.round(parsed.amount * 100) / 100 : null,
-        unit: parsed?.unit || "",
-        rawQuantity: String(prod.quantity || "").trim(),
-        nutriments: (() => {
-          const nutr = prod.nutriments && typeof prod.nutriments === "object" ? prod.nutriments : null;
-          const preferMl = (parsed?.unit || "") === "ml";
-          const kcal = round1(pickKcal(nutr, preferMl));
-          const protein = round1(pickNutri(nutr, "proteins", preferMl));
-          const carbs = round1(pickNutri(nutr, "carbohydrates", preferMl));
-          const fat = round1(pickNutri(nutr, "fat", preferMl));
-          const sugar = round1(pickNutri(nutr, "sugars", preferMl));
-          const fiber = round1(pickNutri(nutr, "fiber", preferMl));
-          const salt = round1(pickNutri(nutr, "salt", preferMl));
-          if (kcal === null && protein === null && carbs === null && fat === null && sugar === null && fiber === null && salt === null) return null;
-          return {
-            base: preferMl ? "100ml" : "100g",
-            kcalPer100: kcal,
-            proteinPer100: protein,
-            carbsPer100: carbs,
-            fatPer100: fat,
-            sugarPer100: sugar,
-            fiberPer100: fiber,
-            saltPer100: salt
-          };
-        })(),
-        fetchedAt: new Date().toISOString()
-      };
+    const out = {
+      name: name || "",
+      brands: brands || "",
+      amount: parsed?.amount ? Math.round(parsed.amount * 100) / 100 : null,
+      unit: parsed?.unit || "",
+      rawQuantity: String(prod.quantity || "").trim(),
+      nutriments: (() => {
+        const nutr = prod.nutriments && typeof prod.nutriments === "object" ? prod.nutriments : null;
+        const preferMl = (parsed?.unit || "") === "ml";
+        const kcal = round1(pickKcal(nutr, preferMl));
+        const protein = round1(pickNutri(nutr, "proteins", preferMl));
+        const carbs = round1(pickNutri(nutr, "carbohydrates", preferMl));
+        const fat = round1(pickNutri(nutr, "fat", preferMl));
+        const sugar = round1(pickNutri(nutr, "sugars", preferMl));
+        const fiber = round1(pickNutri(nutr, "fiber", preferMl));
+        const salt = round1(pickNutri(nutr, "salt", preferMl));
+        return { kcal, protein, carbs, fat, sugar, fiber, salt };
+      })()
+    };
 
-      cache[code] = out;
-      if (typeof persist === "function") persist();
-      return out;
-    } catch {
-      return null;
-    }
+    cache[code] = out;
+    persist();
+    return out;
+  } catch (e) {
+    console.warn("[OFF] lookup failed", code, e);
+    return null;
   }
+}
 
   const ui = {
     openIngredientMenus: new Set(),
