@@ -1,13 +1,15 @@
 (() => {
   // Zentrale Build-/Versions-Infos.
   // Regel: bei JEDEM Update die version erhöhen. buildId kann pro Deploy neu sein.
-  const version = "v0.4.25";
-  const buildId = "20260220195000";
+  const version = "v0.4.26";
+  const buildId = "20260220203000";
 
   const meta = {
     version,
     buildId,
-    cacheName: `einkauf-rezepte-pwa-${buildId}`
+    // Ein Cache-Name, der *beides* enthält: Release + Build.
+    // So siehst du im UI sofort, ob SW/Cache wirklich zu deinem Release passt.
+    cacheName: `einkauf-rezepte-pwa-${version}-${buildId}`
   };
 
   // In normalen Seiten ist `self` == `window`. Im Service Worker ist `self` der SW-Global.

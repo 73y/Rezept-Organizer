@@ -112,7 +112,23 @@ self.addEventListener("fetch", (event) => {
 
 
 self.addEventListener("message", (event) => {
-  if (event?.data?.type === "SKIP_WAITING") {
+  const type = event?.data?.type;
+
+  if (type === "SKIP_WAITING") {
     self.skipWaiting();
+    return;
+  }
+
+  // Debug/Info: Settings kann damit auslesen, welchen Cache der laufende SW nutzt.
+  // Antwort erfolgt über MessageChannel-Port (event.ports[0]).
+  if (type === "GET_SW_META" && event.ports && event.ports[0]) {
+    try {
+      event.ports[0].postMessage({
+        cacheName: CACHE_NAME,
+        appMeta: self.APP_META || null,
+      });
+    } catch {
+      // ignore
+    }
   }
 });

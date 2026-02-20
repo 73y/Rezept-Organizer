@@ -171,8 +171,9 @@
 
         <div class="small" style="line-height:1.6;">
           <div>App-Version: <b>${esc(meta.version)}</b></div>
-          <div>Build-ID: <b>${esc(meta.buildId)}</b></div>
-          <div>Service-Worker Cache: <b id="sw-cache-name">${esc(meta.cacheName || "—")}</b></div>
+          <div>Build-ID (App): <b>${esc(meta.buildId)}</b></div>
+          <div>SW-Cache (aktiv): <b id="sw-cache-name">prüfe…</b></div>
+          <div>SW-Meta: <b id="sw-meta">prüfe…</b></div>
           <div>Update-Status: <b id="sw-update-status">prüfe…</b></div>
         </div>
 
@@ -186,28 +187,60 @@
     (async () => {
       const elStatus = container.querySelector("#sw-update-status");
       const elCache = container.querySelector("#sw-cache-name");
+      const elMeta = container.querySelector("#sw-meta");
       if (!elStatus) return;
+
       try {
         if (!("serviceWorker" in navigator)) {
           elStatus.textContent = "Service Worker nicht aktiv";
+          if (elCache) elCache.textContent = "—";
+          if (elMeta) elMeta.textContent = "—";
           return;
         }
+
         const reg = await navigator.serviceWorker.getRegistration("./");
         if (!reg) {
           elStatus.textContent = "nicht registriert";
+          if (elCache) elCache.textContent = "—";
+          if (elMeta) elMeta.textContent = "—";
           return;
         }
 
         // waiting = Update liegt bereit, wird nach Reload aktiv
-        if (reg.waiting) {
-          elStatus.textContent = "Update verfügbar";
-        } else {
-          elStatus.textContent = "Up to date";
+        elStatus.textContent = reg.waiting ? "Update verfügbar" : "Up to date";
+
+        // Laufenden SW nach seiner Meta fragen (Cache-Name + APP_META aus dem SW-Scope)
+        const swInfo = await new Promise((resolve) => {
+          const ctl = navigator.serviceWorker.controller;
+          if (!ctl) return resolve(null);
+          const ch = new MessageChannel();
+          ch.port1.onmessage = (ev) => resolve(ev.data || null);
+          try {
+            ctl.postMessage({ type: "GET_SW_META" }, [ch.port2]);
+          } catch {
+            resolve(null);
+          }
+          // safety timeout
+          setTimeout(() => resolve(null), 800);
+        });
+
+        const activeCache = swInfo?.cacheName || "(unbekannt)";
+        if (elCache) elCache.textContent = activeCache;
+
+        const swMeta = swInfo?.appMeta;
+        if (elMeta) {
+          if (swMeta?.version && swMeta?.buildId) {
+            elMeta.textContent = `${swMeta.version} • ${swMeta.buildId}`;
+          } else {
+            elMeta.textContent = "(keine Meta)";
+          }
         }
 
-        // Cache-Name aus APP_META ist der Ziel-Cache. Ob der aktiv ist, hängt vom Reload ab.
-        if (elCache && meta.cacheName) elCache.textContent = meta.cacheName;
-      } catch (e) {
+        // Zusatz-Info: Wenn aktiver Cache nicht zum Ziel passt, ist ein Reload nötig.
+        if (!reg.waiting && meta.cacheName && activeCache && activeCache !== meta.cacheName) {
+          elStatus.textContent = "Update verfügbar";
+        }
+      } catch {
         elStatus.textContent = "Status unbekannt";
       }
     })();
