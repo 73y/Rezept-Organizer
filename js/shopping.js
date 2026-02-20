@@ -897,7 +897,7 @@ modal.modal.addEventListener("change", (ev) => {
       // quantity
       let parsed = null;
       if (prod.product_quantity && prod.product_quantity_unit) parsed = parseOffQuantity(`${prod.product_quantity}${prod.product_quantity_unit}`);
-      if (!parsed && prod.quantity) parsed = parseQuantityString(toText(prod.quantity));
+      if (!parsed && prod.quantity) parsed = parseOffQuantity(toText(prod.quantity));
 
       const ingredientsText = toText(prod.ingredients_text_de || prod.ingredients_text || "").trim();
 
@@ -1185,12 +1185,11 @@ modal.modal.addEventListener("change", (ev) => {
       });
     }
 
-    async function createAndAssignNew(scannedCode) {
+    async function createAndAssignNew(scannedCode, offPrefill = null) {
       const r = getReceipt();
       const cur = getCurrentItem(r);
       if (!r || !cur) return;
-
-      const off = await fetchOffSuggestion(state, persist, scannedCode);
+      const off = offPrefill || await fetchOffSuggestion(state, persist, scannedCode);
       const qty = off?.amount && off?.unit ? { amount: off.amount, unit: off.unit } : null;
 
       const prefillPrice = (() => {
@@ -1296,11 +1295,17 @@ ${offDebugHtml(state, code)}
         try { cur.offName = offNameTmp; } catch {}
       }
 
+
+      // If OFF found a product but didn't provide a clear quantity, don't auto-open the editor.
+      if (offTmp && offTmp.name && !(offTmp.amount && offTmp.unit)) {
+        msgEl.textContent = "Open Food Facts: Produkt gefunden, aber Menge/Einheit fehlt – bitte manuell ergänzen.";
+      }
+
       // Fast path: if Open Food Facts returned usable data, open the create-modal directly.
       // (Still "unknown" locally until you save it as an ingredient.)
-      if (offTmp && (offTmp.name || offTmp.ingredientsText || (offTmp.amount && offTmp.unit) || offTmp.nutriments)) {
-        msgEl.textContent = "Open Food Facts: Produkt gefunden – bitte bestätigen.";
-        try { await createAndAssignNew(code); return; } catch {}
+      if (offTmp && offTmp.name && offTmp.amount && offTmp.unit) {
+        msgEl.textContent = "Open Food Facts: Produkt gefunden – Daten übernommen.";
+        try { await createAndAssignNew(code, offTmp); return; } catch {}
       }
 
 const sug = suggestIngredientsByName(state, (cur.offName || cur.rawName || ""), 3);
