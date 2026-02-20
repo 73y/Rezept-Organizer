@@ -170,7 +170,7 @@
     let kind = "item";
     if (/pfand/.test(low)) kind = "pfand";
     else if (/rabatt|coupon|gutschein|payback|aktion|bonus/.test(low)) kind = "discount";
-    else if (/mwst|ust/.test(low)) kind = "misc";
+    else if (/(^|[^A-Za-zÄÖÜäöüß])(mwst|ust)($|[^A-Za-zÄÖÜäöüß])/.test(low)) kind = "misc";
 
     items.push({
       id: uid(),
@@ -455,7 +455,85 @@ function findPurchaseLogEntryForReceiptItem(state, receiptId, receiptItemId) {
     return (state.purchaseLog || []).find((e) => e && e.source === "receipt" && e.receiptId === receiptId && e.receiptItemId === receiptItemId) || null;
   }
 
-  function upsertPurchaseLogFromReceiptItem(state, receipt, item) {
+    function addDaysISO(baseISO, days) {
+    if (!baseISO) return null;
+    const d = new Date(baseISO);
+    if (Number.isNaN(d.getTime())) return null;
+    d.setDate(d.getDate() + (Number(days) || 0));
+    return d.toISOString();
+  }
+
+  // Receipt -> Pantry sync (idempotent per receipt item)
+  function syncPantryFromReceiptItem(state, receipt, item) {
+    try {
+      if (!state || !receipt || !item) return;
+
+      const receiptId = receipt.id || null;
+      const itemId = item.id || null;
+
+      // Remove pantry entry if item is unmapped OR not a real "item" (pfand/discount/etc.)
+      const shouldExist = !!item.matchedIngredientId && (!item.kind || item.kind === "item");
+      if (!shouldExist) {
+        if (receiptId && itemId && Array.isArray(state.pantry)) {
+          const before = state.pantry.length;
+          state.pantry = state.pantry.filter((p) => !(p && p.source === "receipt" && p.receiptId === receiptId && p.receiptItemId === itemId));
+          if (before !== state.pantry.length && typeof normalizePantry === "function") normalizePantry(state);
+        }
+        return;
+      }
+
+      const ing = (state.ingredients || []).find((x) => x && x.id === item.matchedIngredientId) || null;
+      if (!ing) return;
+
+      const qty = Math.max(1, Math.round(Number(item.qty) || 1));
+      const packAmt = Number(ing.amount) || 0;
+      const unit = (ing.unit || "").toString();
+      const amount = packAmt > 0 ? (packAmt * qty) : qty;
+
+      const boughtAt = receipt.at || receipt.createdAt || new Date().toISOString();
+      const expiresAt = (Number(ing.shelfLifeDays) > 0) ? addDaysISO(boughtAt, Number(ing.shelfLifeDays)) : null;
+
+      const cost = Number(item.lineTotal) || 0;
+      const unitCost = (Number.isFinite(cost) && amount > 0) ? (cost / amount) : 0;
+
+      if (!Array.isArray(state.pantry)) state.pantry = [];
+
+      let p = null;
+      if (receiptId && itemId) {
+        p = state.pantry.find((x) => x && x.source === "receipt" && x.receiptId === receiptId && x.receiptItemId === itemId) || null;
+      }
+
+      if (!p) {
+        p = {
+          id: uid(),
+          ingredientId: ing.id,
+          amount: Number(amount.toFixed(4)),
+          unit,
+          boughtAt,
+          enteredAt: new Date().toISOString(),
+          source: "receipt",
+          receiptId,
+          receiptItemId: itemId,
+          expiresAt,
+          cost: Number.isFinite(cost) ? Number(cost.toFixed(2)) : 0,
+          unitCost: Number.isFinite(unitCost) ? Number(unitCost.toFixed(6)) : 0
+        };
+        state.pantry.push(p);
+      } else {
+        p.ingredientId = ing.id;
+        p.amount = Number(amount.toFixed(4));
+        p.unit = unit;
+        p.boughtAt = boughtAt;
+        p.expiresAt = expiresAt;
+        p.cost = Number.isFinite(cost) ? Number(cost.toFixed(2)) : 0;
+        p.unitCost = Number.isFinite(unitCost) ? Number(unitCost.toFixed(6)) : 0;
+      }
+
+      if (typeof normalizePantry === "function") normalizePantry(state);
+    } catch {}
+  }
+
+function upsertPurchaseLogFromReceiptItem(state, receipt, item) {
     const at = receipt.at;
     const entry = findPurchaseLogEntryForReceiptItem(state, receipt.id, item.id);
     const qty = Math.max(1, Math.round(Number(item.qty) || 1));
@@ -509,7 +587,11 @@ function findPurchaseLogEntryForReceiptItem(state, receiptId, receiptItemId) {
       entry.unit = "";
       entry.buyAmount = 0;
     }
+
+    // keep pantry in sync
+    syncPantryFromReceiptItem(state, receipt, item);
   }
+
 
   function openReceiptDetailModal(state, persist, receiptId) {
     const receipt = (state.receipts || []).find((r) => r && r.id === receiptId);

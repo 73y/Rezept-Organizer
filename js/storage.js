@@ -352,7 +352,13 @@ function normalizePantry(state) {
     const ing = ingMap.get(ingId);
     const unit = (p?.unit ?? ing?.unit ?? "").toString();
 
-    const boughtDay = dateKey(p?.boughtAt);
+    
+    // Receipt entries must stay unique per receipt item (otherwise multiple purchases merge and cannot be updated)
+    if (String(p?.source || "") === "receipt" && (p?.receiptId || p?.receiptItemId)) {
+      return `receipt|${p?.receiptId || ""}|${p?.receiptItemId || p?.id || ""}`;
+    }
+
+const boughtDay = dateKey(p?.boughtAt);
     const expDay = dateKey(p?.expiresAt);
 
     // Wenn beides fehlt, NICHT mergen (sonst klebt alles zusammen)
