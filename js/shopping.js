@@ -1025,6 +1025,10 @@ modal.modal.addEventListener("change", (ev) => {
     let paused = false;
     let tickTimer = null;
 
+    // Letzte OFF-Antwort (für "Fehlende Angaben eintragen")
+    let lastOffSuggestion = null;
+    let lastOffCode = "";
+
     function close() {
       stopCamera();
       overlay.remove();
@@ -1296,16 +1300,45 @@ ${offDebugHtml(state, code)}
       }
 
 
-      // If OFF found a product but didn't provide a clear quantity, don't auto-open the editor.
-      if (offTmp && offTmp.name && !(offTmp.amount && offTmp.unit)) {
-        msgEl.textContent = "Open Food Facts: Produkt gefunden, aber Menge/Einheit fehlt – bitte manuell ergänzen.";
-      }
+      // Merken, damit wir es (falls unvollständig) per Button ins Bearbeiten übernehmen können.
+      lastOffSuggestion = offTmp;
+      lastOffCode = code;
 
-      // Fast path: if Open Food Facts returned usable data, open the create-modal directly.
-      // (Still "unknown" locally until you save it as an ingredient.)
-      if (offTmp && offTmp.name && offTmp.amount && offTmp.unit) {
-        msgEl.textContent = "Open Food Facts: Produkt gefunden – Daten übernommen.";
+      // Prüfen, ob wirklich "alles da ist", was wir automatisch übernehmen wollen.
+      // Wichtig: Wenn etwas fehlt (z.B. Nährwerte), NICHT automatisch ins Bearbeiten springen.
+      const missing = [];
+      if (!(offTmp && offTmp.name)) missing.push("Name");
+      if (!(offTmp && offTmp.amount && offTmp.unit)) missing.push("Menge/Einheit");
+
+      const hasNutriments = (() => {
+        const n = offTmp?.nutriments;
+        if (!n || typeof n !== "object") return false;
+        // reicht, wenn wenigstens EIN sinnvoller Wert da ist
+        const keys = ["energy-kcal_100g","energy_100g","proteins_100g","carbohydrates_100g","fat_100g"];
+        return keys.some((k) => n[k] != null && n[k] !== "" && !Number.isNaN(Number(n[k])));
+      })();
+      if (!hasNutriments) missing.push("Nährwerte");
+
+      if (missing.length === 0) {
+        // Alles da -> automatisch übernehmen und Bearbeiten öffnen.
+        msgEl.textContent = "Open Food Facts: Vollständige Daten gefunden – wird übernommen…";
         try { await createAndAssignNew(code, offTmp); return; } catch {}
+      } else if (offTmp && offTmp.name) {
+        // Produkt gefunden, aber es fehlen Infos -> anzeigen + Button anbieten.
+        msgEl.textContent = `Open Food Facts: Produkt gefunden, aber es fehlen: ${missing.join(", ")}.`;
+        resultEl.innerHTML = `
+          <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
+            <div style="font-weight:800;">Produkt gefunden – Angaben fehlen</div>
+            <div class="small muted2" style="margin-top:4px;">Fehlt: <b>${esc(missing.join(", "))}</b></div>
+            <div class="small muted2" style="margin-top:6px;">Du kannst jetzt entscheiden: weiter scannen oder die fehlenden Angaben eintragen.</div>
+            ${offDebugHtml(state, code)}
+            <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
+              <button class="success" data-action="editOff" data-code="${esc(code)}">Fehlende Angaben eintragen</button>
+              <button data-action="resume">Weiter scannen</button>
+            </div>
+          </div>
+        `;
+        return;
       }
 
 const sug = suggestIngredientsByName(state, (cur.offName || cur.rawName || ""), 3);
@@ -1372,6 +1405,17 @@ ${offDebugHtml(state, code)}
         const code = btn.getAttribute("data-code");
         resultEl.innerHTML = `<div class="small muted2">Zuordnung…</div>`;
         await assignAndEdit(ingId, code);
+        return;
+      }
+
+      if (a === "editOff") {
+        const code = btn.getAttribute("data-code") || "";
+        if (!lastOffSuggestion || code !== lastOffCode) {
+          resultEl.innerHTML = `<div class="small muted2">Daten nicht verfügbar – bitte erneut scannen.</div>`;
+          return;
+        }
+        resultEl.innerHTML = `<div class="small muted2">Öffne Bearbeiten…</div>`;
+        try { await createAndAssignNew(code, lastOffSuggestion); } catch {}
         return;
       }
 
