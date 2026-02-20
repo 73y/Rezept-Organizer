@@ -112,7 +112,7 @@
       let kind = "item";
       if (/pfand/.test(low)) kind = "pfand";
       else if (/rabatt|coupon|gutschein|payback|aktion|bonus/.test(low)) kind = "discount";
-      else if (/mwst|ust/.test(low)) kind = "misc";
+      else if (/(^|[^a-z0-9äöüß])(mwst|ust)($|[^a-z0-9äöüß])/.test(low)) kind = "misc";
 
       items.push({
         id: uid(),
@@ -785,36 +785,108 @@ modal.modal.addEventListener("change", (ev) => {
     const c = cleanBarcode(code);
     if (!c) return null;
 
+    // simple validity: EAN/UPC/GTIN lengths
+    if (![8, 12, 13, 14].includes(c.length)) return null;
+
     const cache = ensureBarcodeCache(state);
     const cached = cache[c];
-    if (cached && typeof cached === "object") return cached;
+    if (cached && typeof cached === "object" && (cached.name || (cached.amount && cached.unit))) return cached;
 
-    try {
-      const url = `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(c)}.json`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error("OFF fetch failed");
-      const json = await res.json();
-      const prod = json?.product;
-      if (!prod) return null;
+    const debug = (state.__debug ||= {});
+    debug.lastOff = { code: c, at: new Date().toISOString(), tries: [], result: "" };
 
-      const name = (prod.product_name || prod.product_name_de || prod.generic_name || "").trim();
-      const qty = parseOffQuantity(prod.quantity);
+    const OFF_FIELDS = "product_name,product_name_de,generic_name,quantity,product_quantity,product_quantity_unit,brands,nutriments,ingredients_text,ingredients_text_de";
+    const V2_NET = "https://world.openfoodfacts.net/api/v2/product/";
+    const V2_ORG = "https://world.openfoodfacts.org/api/v2/product/";
+    const V0_NET = "https://world.openfoodfacts.net/api/v0/product/";
+    const V0_ORG = "https://world.openfoodfacts.org/api/v0/product/";
+
+    const fetchWithTimeout = async (url, ms) => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), ms);
+      try {
+        return await fetch(url, { method: "GET", signal: ctrl.signal });
+      } finally {
+        clearTimeout(t);
+      }
+    };
+
+    const tryJson = async (url) => {
+      const entry = { url, ok: false, status: null, note: "" };
+      debug.lastOff.tries.push(entry);
+      try {
+        const res = await fetchWithTimeout(url, 9000);
+        entry.status = res.status;
+
+        const ct = (res.headers.get("content-type") || "").toLowerCase();
+        if (!res.ok) {
+          entry.note = `HTTP ${res.status}`;
+          return null;
+        }
+        if (!ct.includes("application/json")) {
+          entry.note = `content-type ${ct || "?"}`;
+          return null;
+        }
+
+        const json = await res.json();
+        entry.ok = true;
+
+        // Some OFF endpoints can return JSON without "product"
+        if (!json || !json.product) entry.note = (entry.note ? entry.note + "; " : "") + "no product in JSON";
+        return json;
+      } catch (e) {
+        entry.note = String(e?.name === "AbortError" ? "timeout" : (e?.message || e || "fetch failed"));
+        return null;
+      }
+    };
+
+    const parseProd = (prod) => {
+      if (!prod || typeof prod !== "object") return null;
+
+      const name = String(prod.product_name_de || prod.product_name || prod.generic_name || "").trim();
+      const brands = String(prod.brands || "").trim();
+
+      let qty = null;
+      if (prod.product_quantity && prod.product_quantity_unit) qty = parseOffQuantity(`${prod.product_quantity}${prod.product_quantity_unit}`);
+      if (!qty && prod.quantity) qty = parseOffQuantity(prod.quantity);
+
       const nutriments = prod.nutriments || null;
+      const ingredientsText = String(prod.ingredients_text_de || prod.ingredients_text || "").trim();
 
-      const out = {
+      if (!name && !brands && !qty && !nutriments && !ingredientsText) return null;
+
+      return {
         name,
+        brands,
         amount: qty?.amount || 0,
         unit: qty?.unit || "",
         nutriments,
+        ingredientsText,
         fetchedAt: new Date().toISOString()
       };
+    };
 
-      cache[c] = out;
-      if (typeof persist === "function") persist();
-      return out;
-    } catch {
-      return null;
+    const urls = [
+      `${V2_NET}${encodeURIComponent(c)}?fields=${encodeURIComponent(OFF_FIELDS)}&lc=de&cc=de`,
+      `${V2_ORG}${encodeURIComponent(c)}?fields=${encodeURIComponent(OFF_FIELDS)}&lc=de&cc=de`,
+      `${V0_NET}${encodeURIComponent(c)}.json`,
+      `${V0_ORG}${encodeURIComponent(c)}.json`
+    ];
+
+    for (const url of urls) {
+      const json = await tryJson(url);
+      const prod = json?.product;
+      const parsed = parseProd(prod);
+      if (parsed) {
+        cache[c] = parsed;
+        debug.lastOff.result = "hit";
+        if (typeof persist === "function") persist();
+        return parsed;
+      }
     }
+
+    debug.lastOff.result = "miss";
+    return null;
   }
 
   function openReceiptGuidedScanModal(state, persist, receiptId, opts = {}) {
@@ -1109,6 +1181,22 @@ modal.modal.addEventListener("change", (ev) => {
 
       pauseScan();
 
+      const offDbgLine = (() => {
+        const dbg = state.__debug?.lastOff;
+        if (!dbg || dbg.code !== cleanBarcode(code)) return "";
+        const tries = Array.isArray(dbg.tries) ? dbg.tries : [];
+        const parts = tries.map((t) => {
+          let host = "";
+          try { host = new URL(t.url).hostname.replace(/^world\./, ""); } catch {}
+          const note = t.note || (t.ok ? "OK" : "fail");
+          return `${host ? host + ": " : ""}${note}`;
+        }).filter(Boolean);
+        let txt = parts.join(" | ");
+        if (!txt) return "";
+        if (txt.length > 140) txt = txt.slice(0, 140) + "…";
+        return txt;
+      })();
+
       const ingByBarcode = findIngredientByBarcode(state, code);
       if (ingByBarcode) {
         const score = nameSimilarity(cur.rawName || "", ingByBarcode.name || "");
@@ -1120,6 +1208,7 @@ modal.modal.addEventListener("change", (ev) => {
             <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
               <div style="font-weight:800;">Erkannt: ${esc(ingByBarcode.name || "")}</div>
               <div class="small muted2" style="margin-top:4px;">Barcode: <b>${esc(code)}</b></div>
+${offDbgLine ? `<div class="small muted2" style="margin-top:4px;">OFF: ${esc(offDbgLine)}</div>` : ``}
 <div class="small muted2" style="margin-top:4px;">Das passt evtl. nicht zu „${esc(cur.rawName || "")}“. Trotzdem zuordnen?</div>
               <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
                 <button class="primary" data-action="assignIng" data-ingredient-id="${esc(ingByBarcode.id)}" data-code="${esc(code)}">Trotzdem zuordnen</button>
@@ -1151,6 +1240,7 @@ modal.modal.addEventListener("change", (ev) => {
         <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
           <div style="font-weight:800;">Unbekannter Barcode</div>
           <div class="small muted2" style="margin-top:4px;">Barcode: <b>${esc(code)}</b></div>
+${offDbgLine ? `<div class="small muted2" style="margin-top:4px;">OFF: ${esc(offDbgLine)}</div>` : ``}
 <div class="small muted2" style="margin-top:4px;">Wähle eine passende Zutat oder lege eine neue an.</div>
           <div style="display:grid; gap:8px; margin-top:10px;">${sugRows}</div>
           <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:12px;">
