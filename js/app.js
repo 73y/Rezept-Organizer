@@ -2,7 +2,7 @@
   const VIEWS = ["dashboard", "inventory", "ingredients", "recipes", "shopping", "stats", "settings", "purchaselog", "cookhistory"];
   let currentView = "dashboard";
   let state = null;
-  window.__BUILD = "v0.4.21-20260220140000";
+  window.__BUILD = "v0.4.22-20260220151330";
 
   const $ = (sel) => document.querySelector(sel);
   const $all = (sel) => Array.from(document.querySelectorAll(sel));
