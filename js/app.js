@@ -26,7 +26,16 @@
 
   function persist({ renderNow = false } = {}) {
     const saved = saveState(state);
-    if (saved) state = saved;
+
+    // IMPORTANT: keep the same object reference for all views/modules.
+    // Many modules hold on to `state` from their initial render call.
+    // If we replace `state` with a new object, their updates go into a stale object and get lost.
+    if (saved && saved !== state) {
+      // wipe & re-assign (preserve reference)
+      for (const k of Object.keys(state)) delete state[k];
+      Object.assign(state, saved);
+    }
+
     applyThemeFromState();
     if (renderNow) render(currentView);
     return state;
