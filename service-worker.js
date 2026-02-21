@@ -1,5 +1,11 @@
 /* service-worker.js */
-const CACHE_NAME = "einkauf-rezepte-pwa-v0.4.34-20260221105717";
+const SW_META = {
+  version: "v0.4.35",
+  buildId: "20260221120957",
+};
+
+const CACHE_NAME = `einkauf-rezepte-pwa-${SW_META.version}-${SW_META.buildId}`;
+
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -7,13 +13,19 @@ const APP_SHELL = [
   "./manifest.webmanifest",
   "./offline.html",
   "./service-worker.js",
+
+  // Meta
   "./js/appMeta.js",
+
+  // Core
   "./js/storage.js",
   "./js/models.js",
   "./js/utils.js",
   "./js/ui.js",
   "./js/audit.js",
   "./js/actions.js",
+
+  // Views / Modules
   "./js/ingredients.js",
   "./js/recipes/recipesLogic.js",
   "./js/recipes/recipesModals.js",
@@ -26,6 +38,8 @@ const APP_SHELL = [
   "./js/purchaselog.js",
   "./js/cookhistory.js",
   "./js/app.js",
+
+  // Icons
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/maskable-192.png",
@@ -63,7 +77,6 @@ self.addEventListener("fetch", (event) => {
       try {
         const fresh = await fetch(req);
         const cache = await caches.open(CACHE_NAME);
-        // Cache the latest index for offline
         cache.put("./index.html", fresh.clone());
         return fresh;
       } catch (e) {
@@ -76,35 +89,75 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // App shell assets: stale-while-revalidate (dev-friendly)
+  // JS/CSS: Network-first to avoid "new HTML + old JS" mismatch
+  const isJsCss = url.pathname.endsWith(".js") || url.pathname.endsWith(".css");
+  if (isJsCss) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE_NAME);
+      try {
+        const fresh = await fetch(req);
+        if (fresh && fresh.ok) cache.put(req, fresh.clone());
+        return fresh;
+      } catch (e) {
+        return (await cache.match(req, { ignoreSearch: true })) || Response.error();
+      }
+    })());
+    return;
+  }
+
+  // Other assets: Cache-first
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
-    const isAsset = url.pathname.endsWith(".js") || url.pathname.endsWith(".css");
-    const cached = await cache.match(req, { ignoreSearch: !isAsset });
+    const cached = await cache.match(req, { ignoreSearch: true });
+    if (cached) return cached;
 
-    const fetchAndCache = async () => {
+    try {
       const fresh = await fetch(req);
       if (fresh && fresh.ok) cache.put(req, fresh.clone());
       return fresh;
-    };
-
-    if (cached) {
-      // Update in background for the next reload
-      event.waitUntil(fetchAndCache().catch(() => {}));
-      return cached;
-    }
-
-    try {
-      return await fetchAndCache();
     } catch (e) {
       return cached || Response.error();
     }
   })());
 });
 
+function replyToMessage(event, payload) {
+  try {
+    if (event.ports && event.ports[0]) {
+      event.ports[0].postMessage(payload);
+      return;
+    }
+    if (event.source && typeof event.source.postMessage === "function") {
+      event.source.postMessage(payload);
+      return;
+    }
+  } catch {
+    // ignore
+  }
+}
 
 self.addEventListener("message", (event) => {
-  if (event?.data?.type === "SKIP_WAITING") {
+  const type = event?.data?.type;
+
+  if (type === "SKIP_WAITING") {
     self.skipWaiting();
+    return;
+  }
+
+  // Meta queries from the app (support multiple names for backwards compatibility)
+  if (type === "GET_SW_META" || type === "GET_META" || type === "GET_SW_INFO") {
+    replyToMessage(event, {
+      type: "SW_META",
+      sw: {
+        version: SW_META.version,
+        buildId: SW_META.buildId,
+        cacheName: CACHE_NAME,
+      }
+    });
+    return;
+  }
+
+  if (type === "GET_CACHE_NAME") {
+    replyToMessage(event, { type: "SW_CACHE_NAME", cacheName: CACHE_NAME });
   }
 });
