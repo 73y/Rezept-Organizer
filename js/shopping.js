@@ -857,9 +857,23 @@ modal.modal.addEventListener("change", (ev) => {
 
     const cache = ensureBarcodeCache(state);
     const cached = cache[code];
-    if (cached && typeof cached === "object" && (cached.name || cached.ingredientsText || (cached.amount && cached.unit))) return cached;
 
+    // IMPORTANT: even when we return a cached hit, we must update debug.lastOff,
+    // otherwise UI can show a cached "hit" while debug still shows an older "miss".
     const debug = (state.__debug ||= {});
+    if (cached && typeof cached === "object" && (cached.name || cached.ingredientsText || (cached.amount && cached.unit) || cached.nutriments)) {
+      debug.lastOff = {
+        code,
+        at: new Date().toISOString(),
+        result: "hit",
+        best: { name: String(cached.name || "").trim(), brands: String(cached.brands || "").trim(), amount: cached.amount ?? null, unit: cached.unit || "", hasNutriments: !!cached.nutriments, cached: true },
+        tries: [{ url: "cache://barcodeLookupCache", ok: true, status: 200, jsonStatus: 1, statusVerbose: "cached", productName: String(cached.name || "").trim(), note: "cache" }]
+      };
+      if (typeof persist === "function") persist();
+      return cached;
+    }
+
+
     debug.lastOff = { code, at: new Date().toISOString(), result: "miss", best: null, tries: [] };
 
     const tryJson = async (url) => {
@@ -1296,7 +1310,7 @@ modal.modal.addEventListener("change", (ev) => {
       const code = cleanBarcode(codeRaw);
       if (!code) return;
 
-      try { if (barcodeEl) barcodeEl.textContent = `Barcode: `; } catch {}
+      try { if (barcodeEl) barcodeEl.textContent = `Barcode: ${code}`; } catch {}
 
       const r = getReceipt();
       const cur = getCurrentItem(r);
