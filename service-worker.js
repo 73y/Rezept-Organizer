@@ -1,8 +1,7 @@
 /* service-worker.js */
-const CACHE_NAME = "einkauf-rezepte-pwa-20260220123000";
+const META = self.APP_META || {};
+const CACHE_NAME = META.cacheName || `einkauf-rezepte-pwa-${META.version || "v0.0.0"}-${META.buildId || "dev"}`;
 
-const SW_MSG = (self.CONTRACTS && self.CONTRACTS.SW && self.CONTRACTS.SW.MSG) ? self.CONTRACTS.SW.MSG : null;
-const SW_KEYS = (self.CONTRACTS && self.CONTRACTS.SW && self.CONTRACTS.SW.PAYLOAD) ? self.CONTRACTS.SW.PAYLOAD : null;
 
 const APP_SHELL = [
   "./",
@@ -11,7 +10,7 @@ const APP_SHELL = [
   "./manifest.webmanifest",
   "./offline.html",
   "./service-worker.js",
-  ""./js/contracts.js"",
+  "./js/contracts.js",
   "./js/storage.js",
   "./js/models.js",
   "./js/utils.js",
