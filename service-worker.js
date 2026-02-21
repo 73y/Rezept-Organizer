@@ -1,5 +1,5 @@
 /* service-worker.js */
-// buildId: 20260221001442
+// buildId: 20260221003821
 // Zentrale Build-/Versions-Infos einlesen (gleiche Quelle wie die App)
 try { importScripts("./js/appMeta.js"); } catch {}
 

@@ -973,12 +973,31 @@ modal.modal.addEventListener("change", (ev) => {
         continue;
       }
 
-      cache[code] = out;
+      // Keep the best hit, but prefer a hit that includes nutriments.
+      // Reason: API v2 with fields sometimes yields partial nutriments; v0 often has full nutriments.
+      if (!debug.lastOff.bestOut) {
+        debug.lastOff.bestOut = out;
+      } else {
+        const curBest = debug.lastOff.bestOut;
+        const bestHasNut = !!curBest.nutriments;
+        const outHasNut = !!out.nutriments;
+        if (outHasNut && !bestHasNut) {
+          debug.lastOff.bestOut = out;
+        }
+      }
+
+      // If we already have nutriments, we're good — stop early.
+      if (debug.lastOff.bestOut && debug.lastOff.bestOut.nutriments) break;
+    }
+
+    const finalOut = debug.lastOff.bestOut || null;
+    if (finalOut) {
+      cache[code] = finalOut;
       debug.lastOff.result = "hit";
-      debug.lastOff.best = { name: out.name || "", brands: out.brands || "", amount: out.amount || null, unit: out.unit || "" };
+      debug.lastOff.best = { name: finalOut.name || "", brands: finalOut.brands || "", amount: finalOut.amount || null, unit: finalOut.unit || "", hasNutriments: !!finalOut.nutriments };
 
       if (typeof persist === "function") persist();
-      return out;
+      return finalOut;
     }
 
     debug.lastOff.result = "miss";
@@ -1026,6 +1045,7 @@ modal.modal.addEventListener("change", (ev) => {
         <div class="scan-video-wrap" style="margin-top:10px;">
           <video class="scan-video" id="rg-video" autoplay playsinline muted></video>
         </div>
+        <div class="small muted2" id="rg-barcode" style="margin-top:6px;">Barcode: —</div>
 
         <div class="small muted2" id="rg-msg" style="margin-top:10px;"></div>
         <div id="rg-result" style="margin-top:12px;"></div>
@@ -1045,6 +1065,7 @@ modal.modal.addEventListener("change", (ev) => {
     const progEl = modal.querySelector("#rg-progress");
     const nextEl = modal.querySelector("#rg-next");
     const msgEl = modal.querySelector("#rg-msg");
+    const barcodeEl = modal.querySelector("#rg-barcode");
     const resultEl = modal.querySelector("#rg-result");
 
     let stream = null;
@@ -1274,6 +1295,8 @@ modal.modal.addEventListener("change", (ev) => {
     async function handleBarcodeFound(codeRaw) {
       const code = cleanBarcode(codeRaw);
       if (!code) return;
+
+      try { if (barcodeEl) barcodeEl.textContent = `Barcode: `; } catch {}
 
       const r = getReceipt();
       const cur = getCurrentItem(r);
