@@ -42,9 +42,6 @@
   window.renderSettingsView = function (container, state) {
     const settings = ensureSettings(state);
 
-    const appMeta = window.APP_META || {};
-    const buildLabel = (appMeta.version && appMeta.buildId) ? `${appMeta.version}-${appMeta.buildId}` : (appMeta.version || "unbekannt");
-
     const purchasesCount = Array.isArray(state.purchaseLog) ? state.purchaseLog.length : 0;
     const purchasesSum = Array.isArray(state.purchaseLog)
       ? state.purchaseLog.reduce((sum, e) => sum + (Number(e?.total) || 0), 0)
@@ -78,7 +75,7 @@
       <div class="card">
         <h2 style="margin:0 0 6px 0;">Einstellungen</h2>
         <p class="small" style="margin:0;">Darstellung, Kochen, Daten-Tools und Verwaltung von Logs.</p>
-        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>${esc(buildLabel)}</b></p>
+        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>${esc((window.APP_META?.version||"?"))}-${esc((window.APP_META?.buildId||"?"))}</b></p>
       </div>
 
       <div class="card">
@@ -167,7 +164,89 @@
           Import/Export arbeitet lokal im Browser. Export enthält automatisch Metadaten (App + Datum), Import akzeptiert beides: <b>Wrapper</b> oder <b>reinen State</b>.
         </div>
       </div>
+      <div class="card" id="about-app-card">
+        <h3 style="margin:0 0 10px 0;">Über diese App</h3>
+        <div class="small" style="line-height:1.5;">
+          App-Version: <b id="about-app-version">?</b><br/>
+          Build-ID (App): <span id="about-app-build">?</span><br/>
+          SW-Cache (aktiv): <span id="about-sw-cache">?</span><br/>
+          SW-Meta: <span id="about-sw-meta">?</span><br/>
+          Update-Status: <b id="about-update-status">?</b>
+        </div>
+        <div class="small" style="margin-top:8px; opacity:0.85;">
+          Tipp: Wenn hier „Update verfügbar“ steht, einmal neu laden – dann ist garantiert alles frisch.
+        </div>
+      </div>
+
     `;
+
+
+    // --- About/Version info (aus APP_META + Service Worker) ---
+    (async () => {
+      try {
+        const meta = window.APP_META || {};
+        const vEl = container.querySelector("#about-app-version");
+        const bEl = container.querySelector("#about-app-build");
+        if (vEl) vEl.textContent = meta.version || "?";
+        if (bEl) bEl.textContent = meta.buildId || "?";
+
+        // Try to show cache names (best effort, even if SW messaging fails)
+        const cacheEl = container.querySelector("#about-sw-cache");
+        if (cacheEl && window.caches?.keys) {
+          const keys = await caches.keys();
+          // Prefer our app caches
+          const appKeys = keys.filter(k => String(k).startsWith("einkauf-rezepte-pwa"));
+          cacheEl.textContent = (appKeys[0] || keys[0] || "(unbekannt)");
+        }
+
+        // Ask SW for meta (best effort)
+        const swMetaEl = container.querySelector("#about-sw-meta");
+        const statusEl = container.querySelector("#about-update-status");
+
+        const askSwMeta = () => new Promise((resolve) => {
+          const regPromise = navigator.serviceWorker?.getRegistration ? navigator.serviceWorker.getRegistration() : Promise.resolve(null);
+          regPromise.then((reg) => {
+            const sw = reg?.active || navigator.serviceWorker?.controller;
+            if (!sw) return resolve(null);
+
+            const ch = new MessageChannel();
+            const timeout = setTimeout(() => resolve(null), 1200);
+            ch.port1.onmessage = (ev) => {
+              clearTimeout(timeout);
+              resolve(ev?.data || null);
+            };
+            try {
+              sw.postMessage({ type: "GET_SW_META" }, [ch.port2]);
+            } catch {
+              clearTimeout(timeout);
+              resolve(null);
+            }
+          }).catch(() => resolve(null));
+        });
+
+        const swMeta = await askSwMeta();
+        if (swMetaEl) {
+          if (swMeta && (swMeta.version || swMeta.buildId)) {
+            swMetaEl.textContent = `${swMeta.version || "?"} • ${swMeta.buildId || "?"}`;
+          } else {
+            swMetaEl.textContent = "(keine Meta)";
+          }
+        }
+
+        // Compute update status
+        if (statusEl) {
+          const targetCache = meta.cacheName || "";
+          const cacheTxt = (container.querySelector("#about-sw-cache")?.textContent || "");
+          const swOk = swMeta && meta.version && meta.buildId && swMeta.version === meta.version && swMeta.buildId === meta.buildId;
+          const cacheOk = targetCache && cacheTxt && cacheTxt.includes(targetCache);
+          if (swOk || cacheOk) statusEl.textContent = "Up to date";
+          else statusEl.textContent = "Update verfügbar";
+        }
+      } catch {
+        // ignore
+      }
+    })();
+
 
     if (container.__settingsBound) return;
     container.__settingsBound = true;
