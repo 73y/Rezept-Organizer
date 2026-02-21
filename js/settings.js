@@ -42,6 +42,9 @@
   window.renderSettingsView = function (container, state) {
     const settings = ensureSettings(state);
 
+    const appMeta = window.APP_META || {};
+    const buildLabel = (appMeta.version && appMeta.buildId) ? `${appMeta.version}-${appMeta.buildId}` : (appMeta.version || "unbekannt");
+
     const purchasesCount = Array.isArray(state.purchaseLog) ? state.purchaseLog.length : 0;
     const purchasesSum = Array.isArray(state.purchaseLog)
       ? state.purchaseLog.reduce((sum, e) => sum + (Number(e?.total) || 0), 0)
@@ -75,7 +78,7 @@
       <div class="card">
         <h2 style="margin:0 0 6px 0;">Einstellungen</h2>
         <p class="small" style="margin:0;">Darstellung, Kochen, Daten-Tools und Verwaltung von Logs.</p>
-        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>v0.4.19-20260220123000</b></p>
+        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>${esc(buildLabel)}</b></p>
       </div>
 
       <div class="card">
