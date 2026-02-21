@@ -234,7 +234,14 @@
           }).catch(() => resolve(null));
         });
 
-        const swMetaRaw = await askSwMeta();
+        const swMeta = await askSwMeta();
+        if (swMetaEl) {
+          if (swMeta && (swMeta.version || swMeta.buildId)) {
+            swMetaEl.textContent = `${swMeta.version || "?"} • ${swMeta.buildId || "?"}`;
+          } else {
+            swMetaEl.textContent = "(keine Meta)";
+          }
+        }
 
 // Service Worker might respond in different shapes:
 // - { type:"SW_META", meta:{version,buildId,cacheName} }
@@ -272,7 +279,7 @@ if (statusEl) {
   statusEl.textContent = (swOk || cacheOk) ? "Up to date" : "Update verfügbar";
 }
 } catch {
-        // ignore
+
       }
     })();
 
