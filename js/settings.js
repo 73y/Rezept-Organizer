@@ -194,9 +194,19 @@
         const cacheEl = container.querySelector("#about-sw-cache");
         if (cacheEl && window.caches?.keys) {
           const keys = await caches.keys();
-          // Prefer our app caches
+          const metaCache = (meta && meta.cacheName) ? String(meta.cacheName) : "";
           const appKeys = keys.filter(k => String(k).startsWith("einkauf-rezepte-pwa"));
-          cacheEl.textContent = (appKeys[0] || keys[0] || "(unbekannt)");
+
+          // If our current release cache exists, show it (most meaningful)
+          if (metaCache && keys.includes(metaCache)) {
+            cacheEl.textContent = metaCache;
+          } else if (appKeys.length) {
+            // keys order is not guaranteed -> pick the "newest looking" one
+            appKeys.sort().reverse();
+            cacheEl.textContent = appKeys[0];
+          } else {
+            cacheEl.textContent = (keys[0] || "(unbekannt)");
+          }
         }
 
         // Ask SW for meta (best effort)
@@ -240,11 +250,16 @@ const swBuild = swMeta?.buildId || swMeta?.appMeta?.buildId || swMeta?.meta?.bui
 const swCacheName =
   swMeta?.cacheName || swMeta?.appMeta?.cacheName || swMeta?.meta?.cacheName || null;
 
+// If SW told us the active cache, prefer that for display
+if (cacheEl && swCacheName) {
+  cacheEl.textContent = swCacheName;
+}
+
 if (swMetaEl) {
   if (swVer || swBuild) {
     swMetaEl.textContent = `${swVer || "?"} • ${swBuild || "?"}`;
   } else {
-    swMetaEl.textContent = "(keine Meta)";
+    swMetaEl.textContent = swMetaRaw ? "(keine Meta)" : "(kein SW aktiv)";
   }
 }
 

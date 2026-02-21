@@ -2,7 +2,7 @@
 importScripts("./js/appMeta.js");
 
 const META = self.APP_META || {};
-const CACHE_NAME = META.cacheName || "einkauf-rezepte-pwa-v0.4.37-20260221132113";
+const CACHE_NAME = META.cacheName || `einkauf-rezepte-pwa-${META.version || "v0.0.0"}-${META.buildId || "dev"}`;
 
 const APP_SHELL = [
   "./",
