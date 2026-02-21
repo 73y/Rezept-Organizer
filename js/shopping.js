@@ -858,23 +858,30 @@ modal.modal.addEventListener("change", (ev) => {
     const cache = ensureBarcodeCache(state);
     const cached = cache[code];
 
-    // IMPORTANT: even when we return a cached hit, we must update debug.lastOff,
-    // otherwise UI can show a cached "hit" while debug still shows an older "miss".
-    const debug = (state.__debug ||= {});
-    if (cached && typeof cached === "object" && (cached.name || cached.ingredientsText || (cached.amount && cached.unit) || cached.nutriments)) {
-      debug.lastOff = {
-        code,
-        at: new Date().toISOString(),
-        result: "hit",
-        best: { name: String(cached.name || "").trim(), brands: String(cached.brands || "").trim(), amount: cached.amount ?? null, unit: cached.unit || "", hasNutriments: !!cached.nutriments, cached: true },
-        tries: [{ url: "cache://barcodeLookupCache", ok: true, status: 200, jsonStatus: 1, statusVerbose: "cached", productName: String(cached.name || "").trim(), note: "cache" }]
-      };
-      if (typeof persist === "function") persist();
-      return cached;
+    // Cache-Hit: Wenn wir schon einen vollständigen Treffer inkl. Nährwerte haben, direkt zurückgeben.
+    // Wenn Nährwerte fehlen, versuchen wir einmal OFF nachzuladen (damit alte Cache-Einträge nicht "für immer" unvollständig bleiben).
+    if (cached && typeof cached === "object" && (cached.name || cached.ingredientsText || (cached.amount && cached.unit))) {
+      if (cached.nutriments) {
+        const debug = (state.__debug ||= {});
+        debug.lastOff = {
+          code,
+          at: new Date().toISOString(),
+          result: "hit",
+          best: cached.name || "",
+          tries: [{ url: "barcodeLookupCache", ok: true, status: 200, jsonStatus: 1, statusVerbose: "cached", productName: cached.name || "", note: "cached (cache)" }]
+        };
+        return cached;
+      }
+      // else: Cache ist "partial" -> OFF prüfen
     }
 
-
+    const debug = (state.__debug ||= {});
     debug.lastOff = { code, at: new Date().toISOString(), result: "miss", best: null, tries: [] };
+
+    // Wenn wir einen Cache-Eintrag hatten, aber ohne Nährwerte: als Hinweis in den Debug-Infos.
+    if (cached && typeof cached === "object" && (cached.name || cached.ingredientsText || (cached.amount && cached.unit)) && !cached.nutriments) {
+      debug.lastOff.tries.push({ url: "barcodeLookupCache", ok: true, status: 200, jsonStatus: 1, statusVerbose: "cached", productName: cached.name || "", note: "cached (partial) – nutriments missing" });
+    }
 
     const tryJson = async (url) => {
       const entry = { url, ok: false, status: null, ct: "", jsonStatus: null, statusVerbose: "", productName: "", note: "" };
@@ -1012,6 +1019,16 @@ modal.modal.addEventListener("change", (ev) => {
 
       if (typeof persist === "function") persist();
       return finalOut;
+    }
+
+    // Wenn OFF nichts liefert, aber wir einen Cache-Eintrag haben, geben wir den Cache zurück
+    // (damit der Nutzer trotzdem weiterarbeiten kann). Debug zeigt dann klar: cache fallback.
+    if (cached && typeof cached === "object" && (cached.name || cached.ingredientsText || (cached.amount && cached.unit))) {
+      debug.lastOff.result = "hit-cache";
+      debug.lastOff.best = cached.name || "";
+      debug.lastOff.tries.push({ url: "barcodeLookupCache", ok: true, status: 200, jsonStatus: 1, statusVerbose: "cached", productName: cached.name || "", note: "cache fallback (OFF miss)" });
+      if (typeof persist === "function") persist();
+      return cached;
     }
 
     debug.lastOff.result = "miss";
