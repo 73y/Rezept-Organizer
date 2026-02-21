@@ -1,8 +1,8 @@
 (() => {
   // Zentrale Build-/Versions-Infos.
   // Regel: bei JEDEM Update die version erhöhen. buildId kann pro Deploy neu sein.
-  const version = "v0.4.30";
-  const buildId = "20260220234737";
+  const version = "v0.4.31";
+  const buildId = "20260221001442";
 
   const meta = {
     version,

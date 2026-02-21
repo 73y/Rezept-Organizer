@@ -823,6 +823,34 @@ modal.modal.addEventListener("change", (ev) => {
 
     return null;
   }
+
+  function mapOffNutriments(nRaw) {
+    // OpenFoodFacts liefert "nutriments" mit Keys wie:
+    // energy-kcal_100g, proteins_100g, carbohydrates_100g, fat_100g
+    // Unsere Zutaten-Modal erwartet: kcalPer100, proteinPer100, carbsPer100, fatPer100
+    if (!nRaw || typeof nRaw !== "object") return null;
+
+    const toNum = (v) => {
+      if (v == null || v === "") return null;
+      const n = Number(String(v).replace(",", "."));
+      return Number.isFinite(n) ? n : null;
+    };
+
+    // kcal: bevorzugt das kcal-Feld. Wenn nur kJ da ist: umrechnen (1 kcal ≈ 4.184 kJ)
+    const kcalDirect = toNum(nRaw["energy-kcal_100g"] ?? nRaw["energy-kcal"]);
+    const kJ = toNum(nRaw["energy_100g"] ?? nRaw["energy"]);
+    const kcalFromKJ = (kcalDirect == null && kJ != null) ? (kJ / 4.184) : null;
+
+    const out = {
+      kcalPer100: (kcalDirect != null) ? kcalDirect : (kcalFromKJ != null ? Math.round(kcalFromKJ * 10) / 10 : null),
+      proteinPer100: toNum(nRaw["proteins_100g"] ?? nRaw["proteins"]),
+      carbsPer100: toNum(nRaw["carbohydrates_100g"] ?? nRaw["carbohydrates"]),
+      fatPer100: toNum(nRaw["fat_100g"] ?? nRaw["fat"])
+    };
+
+    const hasAny = Object.values(out).some((v) => v != null && !Number.isNaN(Number(v)));
+    return hasAny ? out : null;
+  }
   async function fetchOffSuggestion(state, persist, barcode) {
     const code = cleanBarcode(barcode);
     if (!isValidBarcode(code)) return null;
@@ -901,7 +929,7 @@ modal.modal.addEventListener("change", (ev) => {
 
       const ingredientsText = toText(prod.ingredients_text_de || prod.ingredients_text || "").trim();
 
-      const nutriments = prod.nutriments && typeof prod.nutriments === "object" ? prod.nutriments : null;
+      const nutriments = mapOffNutriments(prod.nutriments);
 
       if (!name && !brands && !parsed && !nutriments && !ingredientsText) return null;
 
@@ -1314,26 +1342,33 @@ ${offDebugHtml(state, code)}
         const n = offTmp?.nutriments;
         if (!n || typeof n !== "object") return false;
         // reicht, wenn wenigstens EIN sinnvoller Wert da ist
-        const keys = ["energy-kcal_100g","energy_100g","proteins_100g","carbohydrates_100g","fat_100g"];
+        const keys = ["kcalPer100","proteinPer100","carbsPer100","fatPer100"];
         return keys.some((k) => n[k] != null && n[k] !== "" && !Number.isNaN(Number(n[k])));
       })();
       if (!hasNutriments) missing.push("Nährwerte");
 
-      if (missing.length === 0) {
-        // Alles da -> automatisch übernehmen und Bearbeiten öffnen.
-        msgEl.textContent = "Open Food Facts: Vollständige Daten gefunden – wird übernommen…";
-        try { await createAndAssignNew(code, offTmp); return; } catch {}
-      } else if (offTmp && offTmp.name) {
-        // Produkt gefunden, aber es fehlen Infos -> anzeigen + Button anbieten.
-        msgEl.textContent = `Open Food Facts: Produkt gefunden, aber es fehlen: ${missing.join(", ")}.`;
+      if (offTmp && offTmp.name) {
+        // Wichtig: NICHT automatisch ins Bearbeiten springen.
+        // Der Nutzer soll bewusst bestätigen (und sieht vorher, ob etwas fehlt).
+        const complete = missing.length === 0;
+        msgEl.textContent = complete
+          ? "Open Food Facts: Treffer – bereit zum Übernehmen."
+          : `Open Food Facts: Produkt gefunden, aber es fehlen: ${missing.join(", ")}.`;
+
+        const title = complete ? "Produkt gefunden" : "Produkt gefunden – Angaben fehlen";
+        const note = complete
+          ? "Alle Daten sind da. Du kannst sie jetzt übernehmen."
+          : "Du kannst jetzt entscheiden: weiter scannen oder die fehlenden Angaben eintragen.";
+        const btnText = complete ? "Daten übernehmen" : "Fehlende Angaben eintragen";
+
         resultEl.innerHTML = `
           <div style="border:1px solid var(--border); border-radius:12px; padding:10px;">
-            <div style="font-weight:800;">Produkt gefunden – Angaben fehlen</div>
-            <div class="small muted2" style="margin-top:4px;">Fehlt: <b>${esc(missing.join(", "))}</b></div>
-            <div class="small muted2" style="margin-top:6px;">Du kannst jetzt entscheiden: weiter scannen oder die fehlenden Angaben eintragen.</div>
+            <div style="font-weight:800;">${esc(title)}</div>
+            ${complete ? `` : `<div class="small muted2" style="margin-top:4px;">Fehlt: <b>${esc(missing.join(", "))}</b></div>`}
+            <div class="small muted2" style="margin-top:6px;">${esc(note)}</div>
             ${offDebugHtml(state, code)}
             <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:flex-end; margin-top:10px;">
-              <button class="success" data-action="editOff" data-code="${esc(code)}">Fehlende Angaben eintragen</button>
+              <button class="success" data-action="editOff" data-code="${esc(code)}">${esc(btnText)}</button>
               <button data-action="resume">Weiter scannen</button>
             </div>
           </div>
