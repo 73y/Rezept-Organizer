@@ -224,25 +224,39 @@
           }).catch(() => resolve(null));
         });
 
-        const swMeta = await askSwMeta();
-        if (swMetaEl) {
-          if (swMeta && (swMeta.version || swMeta.buildId)) {
-            swMetaEl.textContent = `${swMeta.version || "?"} • ${swMeta.buildId || "?"}`;
-          } else {
-            swMetaEl.textContent = "(keine Meta)";
-          }
-        }
+        const swMetaRaw = await askSwMeta();
 
-        // Compute update status
-        if (statusEl) {
-          const targetCache = meta.cacheName || "";
-          const cacheTxt = (container.querySelector("#about-sw-cache")?.textContent || "");
-          const swOk = swMeta && meta.version && meta.buildId && swMeta.version === meta.version && swMeta.buildId === meta.buildId;
-          const cacheOk = targetCache && cacheTxt && cacheTxt.includes(targetCache);
-          if (swOk || cacheOk) statusEl.textContent = "Up to date";
-          else statusEl.textContent = "Update verfügbar";
-        }
-      } catch {
+// Service Worker might respond in different shapes:
+// - { type:"SW_META", meta:{version,buildId,cacheName} }
+// - { version, buildId, cacheName } (legacy)
+// - { appMeta:{...}, cacheName:"..." } (legacy)
+const swMetaObj =
+  (swMetaRaw && typeof swMetaRaw === "object" && (swMetaRaw.meta || swMetaRaw.appMeta)) ||
+  null;
+const swMeta = swMetaObj || swMetaRaw || null;
+
+const swVer = swMeta?.version || swMeta?.appMeta?.version || swMeta?.meta?.version || null;
+const swBuild = swMeta?.buildId || swMeta?.appMeta?.buildId || swMeta?.meta?.buildId || null;
+const swCacheName =
+  swMeta?.cacheName || swMeta?.appMeta?.cacheName || swMeta?.meta?.cacheName || null;
+
+if (swMetaEl) {
+  if (swVer || swBuild) {
+    swMetaEl.textContent = `${swVer || "?"} • ${swBuild || "?"}`;
+  } else {
+    swMetaEl.textContent = "(keine Meta)";
+  }
+}
+
+// Compute update status
+if (statusEl) {
+  const targetCache = meta.cacheName || "";
+  const cacheTxt = (container.querySelector("#about-sw-cache")?.textContent || "");
+  const swOk = !!(swVer && swBuild && meta.version && meta.buildId && swVer === meta.version && swBuild === meta.buildId);
+  const cacheOk = !!(targetCache && cacheTxt && cacheTxt.includes(targetCache));
+  statusEl.textContent = (swOk || cacheOk) ? "Up to date" : "Update verfügbar";
+}
+} catch {
         // ignore
       }
     })();
