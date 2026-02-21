@@ -66,8 +66,6 @@
     const report = typeof window.getStorageReport === "function" ? window.getStorageReport() : { status: "ok" };
     const dt = window.dataTools || {};
 
-    const meta = window.APP_META || { version: "v0.0.0", buildId: "0", cacheName: "" };
-
     const auditReport = typeof dt.getAuditReport === "function" ? dt.getAuditReport() : null;
 
     const hasRestore = typeof dt.hasRestorePoint === "function" ? dt.hasRestorePoint() : false;
@@ -77,6 +75,7 @@
       <div class="card">
         <h2 style="margin:0 0 6px 0;">Einstellungen</h2>
         <p class="small" style="margin:0;">Darstellung, Kochen, Daten-Tools und Verwaltung von Logs.</p>
+        <p class="small" style="margin:6px 0 0 0; opacity:0.8;">Build: <b>v0.4.19-20260220123000</b></p>
       </div>
 
       <div class="card">
@@ -165,85 +164,7 @@
           Import/Export arbeitet lokal im Browser. Export enthält automatisch Metadaten (App + Datum), Import akzeptiert beides: <b>Wrapper</b> oder <b>reinen State</b>.
         </div>
       </div>
-
-      <div class="card">
-        <h3 style="margin:0 0 10px 0;">Über diese App</h3>
-
-        <div class="small" style="line-height:1.6;">
-          <div>App-Version: <b>${esc(meta.version)}</b></div>
-          <div>Build-ID (App): <b>${esc(meta.buildId)}</b></div>
-          <div>SW-Cache (aktiv): <b id="sw-cache-name">prüfe…</b></div>
-          <div>SW-Meta: <b id="sw-meta">prüfe…</b></div>
-          <div>Update-Status: <b id="sw-update-status">prüfe…</b></div>
-        </div>
-
-        <div class="small" style="margin-top:10px; opacity:0.8;">
-          Tipp: Wenn hier „Update verfügbar“ steht, einmal neu laden – dann ist garantiert alles frisch.
-        </div>
-      </div>
     `;
-
-    // SW/Update-Status (asynchron nachziehen)
-    (async () => {
-      const elStatus = container.querySelector("#sw-update-status");
-      const elCache = container.querySelector("#sw-cache-name");
-      const elMeta = container.querySelector("#sw-meta");
-      if (!elStatus) return;
-
-      try {
-        if (!("serviceWorker" in navigator)) {
-          elStatus.textContent = "Service Worker nicht aktiv";
-          if (elCache) elCache.textContent = "—";
-          if (elMeta) elMeta.textContent = "—";
-          return;
-        }
-
-        const reg = await navigator.serviceWorker.getRegistration("./");
-        if (!reg) {
-          elStatus.textContent = "nicht registriert";
-          if (elCache) elCache.textContent = "—";
-          if (elMeta) elMeta.textContent = "—";
-          return;
-        }
-
-        // waiting = Update liegt bereit, wird nach Reload aktiv
-        elStatus.textContent = reg.waiting ? "Update verfügbar" : "Up to date";
-
-        // Laufenden SW nach seiner Meta fragen (Cache-Name + APP_META aus dem SW-Scope)
-        const swInfo = await new Promise((resolve) => {
-          const ctl = navigator.serviceWorker.controller;
-          if (!ctl) return resolve(null);
-          const ch = new MessageChannel();
-          ch.port1.onmessage = (ev) => resolve(ev.data || null);
-          try {
-            ctl.postMessage({ type: "GET_SW_META" }, [ch.port2]);
-          } catch {
-            resolve(null);
-          }
-          // safety timeout
-          setTimeout(() => resolve(null), 800);
-        });
-
-        const activeCache = swInfo?.cacheName || "(unbekannt)";
-        if (elCache) elCache.textContent = activeCache;
-
-        const swMeta = swInfo?.appMeta;
-        if (elMeta) {
-          if (swMeta?.version && swMeta?.buildId) {
-            elMeta.textContent = `${swMeta.version} • ${swMeta.buildId}`;
-          } else {
-            elMeta.textContent = "(keine Meta)";
-          }
-        }
-
-        // Zusatz-Info: Wenn aktiver Cache nicht zum Ziel passt, ist ein Reload nötig.
-        if (!reg.waiting && meta.cacheName && activeCache && activeCache !== meta.cacheName) {
-          elStatus.textContent = "Update verfügbar";
-        }
-      } catch {
-        elStatus.textContent = "Status unbekannt";
-      }
-    })();
 
     if (container.__settingsBound) return;
     container.__settingsBound = true;
